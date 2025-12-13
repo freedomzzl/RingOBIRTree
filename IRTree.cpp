@@ -1077,9 +1077,16 @@ void IRTree::bulkBuildGlobalIndex(const std::vector<std::shared_ptr<Document>>& 
         }
     }
 
-    // 批量添加到词汇表
+    // 批量添加到词汇表 
     for (const auto& term : term_frequencies) {
-        vocab.getTermId(term.first); // 这会创建或获取term id
+        int term_id = vocab.addTerm(term.first);
+    
+        // 验证添加是否成功
+        int verify_id = vocab.getTermId(term.first);
+        if (verify_id != term_id) {
+            std::cerr << "ERROR: Vocabulary inconsistency for term '" << term.first
+                << "'. Added as " << term_id << " but found as " << verify_id << std::endl;
+        }
     }
 
     // 批量构建文档向量
