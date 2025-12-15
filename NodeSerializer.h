@@ -1,8 +1,8 @@
 #ifndef NODE_SERIALIZER_H
 #define NODE_SERIALIZER_H
 
-#include "node.h"
-#include "document.h"
+#include "Node.h"
+#include "Document.h"
 #include <vector>
 #include <cstdint>
 #include <memory>

@@ -19,6 +19,8 @@ extern int OramL;
 
 extern int numLeaves;
 
+extern int capacity;
+
 extern int blocksize;
 
 
@@ -37,5 +39,7 @@ extern block dummyBlock;
 extern int maxblockEachbkt;
 
 extern int cacheLevel;
+
+extern const size_t FIXED_BUCKET_SIZE;
 
 #endif

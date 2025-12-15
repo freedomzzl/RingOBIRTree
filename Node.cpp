@@ -1,6 +1,6 @@
 
-#include "node.h"
-#include "document.h"
+#include "Node.h"
+#include "Document.h"
 #include <sstream>
 #include <algorithm>
 

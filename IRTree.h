@@ -8,11 +8,11 @@
 #include <stack>
 #include <functional>
 #include <chrono>
-#include "node.h"
-#include "document.h"
-#include "query.h"
+#include "Node.h"
+#include "Document.h"
+#include "Query.h"
 #include "InvertedIndex.h"
-#include "vocabulary.h"
+#include "Vocabulary.h"
 #include "StorageInterface.h"
 #include"ringoram.h"
 #include <mutex>

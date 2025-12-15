@@ -1,7 +1,7 @@
 #include "IRTree.h"
-#include "RingOramStorage.h"
+#include "RingoramStorage.h"
 #include"NodeSerializer.h"
-#include "query.h"
+#include "Query.h"
 #include <iostream>
 #include <chrono>
 #include <fstream>

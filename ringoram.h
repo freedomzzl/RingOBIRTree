@@ -3,7 +3,6 @@
 #include"bucket.h"
 #include"CryptoUtil.h"
 #include"param.h"
-#include"ServerStorage.h"
 #include<vector>
 #include<cmath>
 #include <memory>
@@ -15,7 +14,6 @@ class ringoram
 public:
 	static int round;
 	static int G;
-	ServerStorage* storage;
 	int* positionmap;
 	vector<block> stash;
 	int c;
@@ -30,8 +28,17 @@ public:
 	int num_leaves;
 
 	int cache_levels;  // 缓存的树层级数
+
+     // 网络通信
+    std::string server_ip_;
+    int server_port_;
+
 	enum Operation { READ, WRITE };
-	ringoram(int n, ServerStorage* storage, int cache_levels = cacheLevel);
+	 ringoram(int n, const std::string& server_ip, int server_port, int cache_levels = cacheLevel);
+    // ~ringoram();
+
+    // 网络初始化
+    void initNetwork();
 
 	bool isPositionCached(int position) const {
 		return position < (1 << cache_levels) - 1;
@@ -43,6 +50,7 @@ public:
 	block FindBlock(bucket bkt, int offset);//在桶中找到对应Block
 	int GetBlockOffset(bucket bkt, int blockindex);//得到Block的offset
 	void ReadBucket(int pos);
+    bucket Read_bucket(int pos);
 	void WriteBucket(int position);
 
 	block ReadPath(int leafid, int blockindex);

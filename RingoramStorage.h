@@ -30,10 +30,6 @@ private:
     std::unique_ptr<ringoram> oram;
 
 
-
-    /// 底层服务器存储（模拟物理存储层）
-    std::unique_ptr<ServerStorage> server_storage;
-
     /// 加密工具类（用于数据加解密）
     std::shared_ptr<CryptoUtils> crypto;
 
@@ -52,6 +48,9 @@ private:
 
     /// ORAM 容量（块数量）
     int capacity;
+
+    std::string server_ip_;
+    int server_port_;
 
 
     // ==============================
@@ -88,9 +87,10 @@ public:
      * @brief 构造函数
      * @param cap ORAM 容量（块数）
      * @param block_size 每个块大小（字节）
-     * @param use_recursive 是否使用递归 ORAM 模式
      */
-    RingOramStorage(int cap, int block_size = 1024);
+    RingOramStorage(int cap, int block_size, 
+                    const std::string& server_ip = "127.0.0.1", 
+                    int server_port = 12345);
 
 
     // ==============================

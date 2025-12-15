@@ -16,14 +16,14 @@ private:
 public:
     block();
     block(int leaf_id, int blockindex, vector<char> data);
-    int GetBlockindex();
+    int GetBlockindex() const;
     void SetBlockindex(int blockindex);
-    int GetLeafid();
+    int GetLeafid() const;
     void SetLeafid(int lead_id);
-    vector<char> GetData();
+    vector<char> GetData() const;
     void SetData(vector<char> data);
     bool IsDummy() const {
-        return blockindex == -1; // 根据你的设计，dummy块的index为-1
+        return blockindex == -1; 
     }
 
 };

@@ -1,21 +1,27 @@
 #include "RingoramStorage.h"
 #include <iostream>
 #include <stdexcept>
+#include<cstring>
 
-RingOramStorage::RingOramStorage(int cap, int block_size)
-    : next_block_id(0), capacity(cap) {
+RingOramStorage::RingOramStorage(int cap, int block_size, 
+                                 const std::string& server_ip, 
+                                 int server_port)
+    : next_block_id(0), 
+      capacity(cap),
+      server_ip_(server_ip),
+      server_port_(server_port) {
 
-    std::cout << "Initializing RingOramStorage with capacity: " << capacity
-        << ", block_size: " << block_size
-        << std::endl;
-
-    // 创建 ServerStorage
-    server_storage = std::make_unique<ServerStorage>();
-
-    oram = std::make_unique<ringoram>(capacity, server_storage.get());
-
-    // 尝试加载已存储的根路径
-    loadRootPath();
+    try {
+        // 创建网络模式的ringoram
+        oram = std::make_unique<ringoram>(capacity, server_ip_, server_port_);
+  
+        // 尝试加载已存储的根路径
+        loadRootPath();
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to initialize RingOramStorage: " << e.what() << std::endl;
+        throw;
+    }
 }
 
 int RingOramStorage::getNextBlockId() {
