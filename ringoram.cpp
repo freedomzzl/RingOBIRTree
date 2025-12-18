@@ -36,6 +36,11 @@ enum RequestType {
     READ_BUCKET = 1,
     WRITE_BUCKET = 2,
     READ_PATH = 3,
+    READ_PATH_FULL = 4,    
+    WRITE_PATH_FULL = 5, 
+    CHECK_NEED_EARLY_SHUFFLE = 6,  
+    CHECK_NEED_EARLY_SHUFFLE_WITH_DATA = 7, 
+    WRITE_BUCKETS = 8,   
     RESPONSE = 100
 };
 
@@ -184,11 +189,11 @@ bool sendRequest(uint32_t type, const std::vector<uint8_t>& request_data,
 
 
 // 析构函数
-// ringoram::~ringoram() {
-//     if (positionmap) {
-//         delete[] positionmap;
-//     }
-// }
+ringoram::~ringoram() {
+    if (positionmap) {
+        delete[] positionmap;
+    }
+}
 
 
 ringoram::ringoram(int n, const std::string& server_ip, int server_port, int cache_levels)
@@ -326,7 +331,7 @@ size_t calculate_bucket_size(const bucket& bkt) {
     return size;
 }
 
-void serialize_block(const block& blk, uint8_t* buffer, size_t& offset) {
+void serialize_block( block& blk, uint8_t* buffer, size_t& offset) {
   
     SerializedBlockHeader* header = reinterpret_cast<SerializedBlockHeader*>(buffer + offset);
     header->leaf_id = blk.GetLeafid();
@@ -358,75 +363,78 @@ block deserialize_block(const uint8_t* data, size_t& offset) {
     return block(header->leaf_id, header->block_index, block_data);
 }
 
-
-std::vector<uint8_t> serialize_bucket(const bucket& bkt) {
-    const size_t FIXED_SIZE = 65536;  // 固定大小
-    
+std::vector<uint8_t> serialize_bucket( bucket& bkt) {
+   
     try {
-        // 分配固定大小的缓冲区
-        std::vector<uint8_t> result(FIXED_SIZE, 0);
-        
+    
+        // 先计算大小
+
+        size_t total_size = calculate_bucket_size(bkt);
+     
+        if (total_size == 0) {
+            std::cerr << "ERROR: Calculated size is 0" << std::endl;
+            return std::vector<uint8_t>();
+        }
+       
+        std::vector<uint8_t> result(total_size);
+      
         // 序列化 bucket header
-        SerializedBucketHeader* bucket_header = 
-            reinterpret_cast<SerializedBucketHeader*>(result.data());
+      
+        SerializedBucketHeader* bucket_header = reinterpret_cast<SerializedBucketHeader*>(result.data());
         bucket_header->Z = bkt.Z;
         bucket_header->S = bkt.S;
         bucket_header->count = bkt.count;
         bucket_header->num_blocks = static_cast<int32_t>(bkt.blocks.size());
-        
+       
         size_t offset = sizeof(SerializedBucketHeader);
-        
+       
         // 序列化 blocks
-        for (int i = 0; i < bkt.blocks.size() && offset < FIXED_SIZE; i++) {
+    
+        for (int i = 0; i < bkt.blocks.size(); i++) {
+          
             serialize_block(bkt.blocks[i], result.data(), offset);
+       
         }
         
         // 序列化 ptrs 和 valids
+   
         int num_slots = bkt.Z + bkt.S;
+ 
+        // 检查边界
+        if (offset + num_slots * 2 * sizeof(int32_t) > total_size) {
+            std::cerr << "ERROR: Not enough space for ptrs and valids" << std::endl;
+            return std::vector<uint8_t>();
+        }
         
         // 序列化 ptrs
-        for (int i = 0; i < num_slots && offset < FIXED_SIZE; i++) {
+        for (int i = 0; i < num_slots; i++) {
             *reinterpret_cast<int32_t*>(result.data() + offset) = bkt.ptrs[i];
             offset += sizeof(int32_t);
         }
         
         // 序列化 valids
-        for (int i = 0; i < num_slots && offset < FIXED_SIZE; i++) {
+        for (int i = 0; i < num_slots; i++) {
             *reinterpret_cast<int32_t*>(result.data() + offset) = bkt.valids[i];
             offset += sizeof(int32_t);
         }
-        
-        // 填充剩余空间为0（可选）
-        // if (offset < FIXED_SIZE) {
-        //     memset(result.data() + offset, 0, FIXED_SIZE - offset);
-        // }
-        
+ 
         return result;
         
     } catch (const std::exception& e) {
-        std::cerr << "serialize_bucket failed: " << e.what() << std::endl;
-        return std::vector<uint8_t>(FIXED_SIZE, 0);  // 返回固定大小的空数据
+        std::cerr << "serialize_bucket failed with exception: " << e.what() << std::endl;
+        return std::vector<uint8_t>();
     }
 }
 
 bucket deserialize_bucket(const uint8_t* data, size_t size) {
-    const size_t FIXED_SIZE = 65536;  // 固定大小
-    
-    // 验证数据大小
-    if (size < FIXED_SIZE) {
-        std::cerr << "WARNING: Data size " << size << " < " << FIXED_SIZE 
-                  << ", using padded data" << std::endl;
-        // 可以在这里创建一个填充数据的副本
-    }
-    
+ 
     if (size < sizeof(SerializedBucketHeader)) {
-        std::cerr << "ERROR: Data too small for header" << std::endl;
+        std::cerr << "  ERROR: Data too small for header" << std::endl;
         throw std::runtime_error("Invalid bucket data: too small");
     }
     
-    const SerializedBucketHeader* bucket_header = 
-        reinterpret_cast<const SerializedBucketHeader*>(data);
-    
+    const SerializedBucketHeader* bucket_header = reinterpret_cast<const SerializedBucketHeader*>(data);
+  
     // 创建空的bucket
     bucket result(0, 0);
     result.Z = bucket_header->Z;
@@ -434,30 +442,39 @@ bucket deserialize_bucket(const uint8_t* data, size_t size) {
     result.count = bucket_header->count;
     
     size_t offset = sizeof(SerializedBucketHeader);
-    
-    // 反序列化 blocks（使用实际块数，而不是header中的num_blocks）
-    int num_blocks = std::min(bucket_header->num_blocks, 11);  // 假设最大11个块
-    for (int i = 0; i < num_blocks && offset < size; i++) {
+ 
+    // 反序列化 blocks
+  
+    for (int i = 0; i < bucket_header->num_blocks && offset < size; i++) {
         result.blocks.push_back(deserialize_block(data, offset));
     }
-    
-    // 反序列化 ptrs 和 valids
+ 
+    //从序列化数据中恢复ptrs和valids
     int num_slots = result.Z + result.S;
     result.ptrs.resize(num_slots, -1);
     result.valids.resize(num_slots, 0);
     
-    // 反序列化 ptrs
-    for (int i = 0; i < num_slots && offset < size; i++) {
-        result.ptrs[i] = *reinterpret_cast<const int32_t*>(data + offset);
-        offset += sizeof(int32_t);
+    // 检查是否有足够的空间来读取ptrs和valids
+    if (offset + num_slots * 2 * sizeof(int32_t) <= size) {
+     
+        // 反序列化 ptrs
+        for (int i = 0; i < num_slots; i++) {
+            int32_t ptr = *reinterpret_cast<const int32_t*>(data + offset);
+            result.ptrs[i] = ptr;
+            offset += sizeof(int32_t);
+        }
+        
+        // 反序列化 valids
+        for (int i = 0; i < num_slots; i++) {
+            int32_t valid = *reinterpret_cast<const int32_t*>(data + offset);
+            result.valids[i] = valid;
+            offset += sizeof(int32_t);
+        }
+   
+    } else {
+        std::cout << "  WARNING: No ptrs and valids data in serialized bucket" << std::endl;
     }
-    
-    // 反序列化 valids
-    for (int i = 0; i < num_slots && offset < size; i++) {
-        result.valids[i] = *reinterpret_cast<const int32_t*>(data + offset);
-        offset += sizeof(int32_t);
-    }
-    
+   
     return result;
 }
 
@@ -592,39 +609,37 @@ void ringoram::WriteBucket(int position)
         bktTowrite.blocks = blocksTobucket;
 
         for (int i = 0; i < maxblockEachbkt; i++) {
-            bktTowrite.ptrs[i] = bktTowrite.blocks[i].GetBlockindex();
-            bktTowrite.valids[i] = 1;
+	        bktTowrite.ptrs[i] = bktTowrite.blocks[i].GetBlockindex();
+	        bktTowrite.valids[i] = 1;
         }
         bktTowrite.count = 0;
 
         // 序列化bucket
         std::vector<uint8_t> serialized_bkt = serialize_bucket(bktTowrite);
-        
-        const size_t FIXED_SIZE = 65536;
-        if (serialized_bkt.size() != FIXED_SIZE) {
-            std::cerr << "WARNING: Serialized bucket size is " 
-                      << serialized_bkt.size() << ", expected " << FIXED_SIZE << std::endl;
-            // 调整大小
-            serialized_bkt.resize(FIXED_SIZE, 0);
+        if (serialized_bkt.empty()) {
+            std::cerr << "Failed to serialize bucket for writing" << std::endl;
+            return;
         }
 
         // 准备请求数据：位置 + bucket数据
-        std::vector<uint8_t> request_data(sizeof(int32_t) + FIXED_SIZE);
+        std::vector<uint8_t> request_data(sizeof(int32_t) + serialized_bkt.size());
         *reinterpret_cast<int32_t*>(request_data.data()) = static_cast<int32_t>(position);
         memcpy(request_data.data() + sizeof(int32_t), 
-               serialized_bkt.data(), FIXED_SIZE);
+               serialized_bkt.data(), serialized_bkt.size());
         
-        // 发送请求
+        // 发送 WRITE_BUCKET 请求
         std::vector<uint8_t> response_data;
         std::string error_msg;
         
         if (!sendRequest(WRITE_BUCKET, request_data, response_data, error_msg)) {
-            std::cerr << "Failed to write bucket: " << error_msg << std::endl;
+            std::cerr << "Failed to write bucket : " << error_msg << std::endl;
         }
     }
-    catch(const std::exception& e) {
-        std::cerr << "Exception in WriteBucket: " << e.what() << std::endl;
+    catch(const std::exception& e)
+    {
+        std::cerr << "Exception in WriteBucket (network): " << e.what() << std::endl;
     }
+    
 }
 
 block ringoram::ReadPath(int leafid, int blockindex)
@@ -673,47 +688,442 @@ block ringoram::ReadPath(int leafid, int blockindex)
     
 }
 
-
-
-void ringoram::EvictPath()
-{
-	int l = G % (1 << L);
-	G += 1;
-
-	int i;
-	for (i = 0; i <= L; i++)
-	{
-		ReadBucket(Path_bucket(l, i));
-	}
-
-	for (i = L; i >= 0; i--)
-	{
-		WriteBucket(Path_bucket(l, i));
-	}
+std::vector<bucket> ringoram::ReadPathFull(int leaf_id) {
+    try {
+        // 准备请求数据
+        std::vector<uint8_t> request_data(sizeof(int32_t));
+        *reinterpret_cast<int32_t*>(request_data.data()) = leaf_id;
+        
+        // 发送 READ_PATH_FULL 请求
+        std::vector<uint8_t> response_data;
+        std::string error_msg;
+        
+        if (!sendRequest(READ_PATH_FULL, request_data, response_data, error_msg)) {
+            std::cerr << "Failed to read path full (network): " << error_msg << std::endl;
+            return {};
+        }
+        
+        // 解析响应
+        std::vector<bucket> result;
+        size_t offset = 0;
+        
+        while (offset < response_data.size()) {
+            if (offset + 8 > response_data.size()) break;
+            
+            // 读取位置信息
+            int32_t position = *reinterpret_cast<const int32_t*>(response_data.data() + offset);
+            offset += sizeof(int32_t);
+            
+            // 读取bucket大小
+            uint32_t bucket_size = *reinterpret_cast<const uint32_t*>(response_data.data() + offset);
+            offset += sizeof(uint32_t);
+            
+            if (offset + bucket_size > response_data.size()) break;
+            
+            // 反序列化bucket
+            bucket bkt = deserialize_bucket(response_data.data() + offset, bucket_size);
+            offset += bucket_size;
+            
+            result.push_back(bkt);
+        }
+        
+        return result;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Exception in ReadPathFull: " << e.what() << std::endl;
+        return {};
+    }
 }
 
-void ringoram::EarlyReshuffle(int l)
-{
-	for (int i = 0; i <= L; i++)
-	{
-		int position = Path_bucket(l, i);
-        bucket bkt=Read_bucket(position);
-
-        if (bkt.count >= dummyBlockEachbkt)
-        {
-            for (int j = 0; j < maxblockEachbkt; j++) {
-		        // 只读取真实且有效的块
-		        if (bkt.ptrs[j] != -1 && bkt.valids[j] && !bkt.blocks[j].IsDummy()) {
-			        // 读取时解密
-			        block encrypted_block = bkt.blocks[j];
-			        vector<char> decrypted_data = decrypt_data(encrypted_block.GetData());
-			        block decrypted_block(encrypted_block.GetLeafid(), encrypted_block.GetBlockindex(), decrypted_data);
-			        stash.push_back(decrypted_block);
-		        }
-	        }
-            WriteBucket(position);
+// 批量写入路径上的所有bucket
+bool ringoram::WritePathFull(int leaf_id, const std::vector<bucket>& buckets_to_write) {
+    try {
+        // 准备请求数据
+        std::vector<uint8_t> request_data;
+        
+        // 将每个bucket序列化并添加到请求数据
+        for (size_t i = 0; i <= L; i++) {
+            int position = Path_bucket(leaf_id, i);
+            
+            if (i < buckets_to_write.size()) {
+                // 序列化bucket
+                std::vector<uint8_t> serialized_bkt = serialize_bucket(
+                    const_cast<bucket&>(buckets_to_write[i])
+                );
+                
+                if (!serialized_bkt.empty()) {
+                    // 添加位置信息
+                    request_data.insert(request_data.end(),
+                                      reinterpret_cast<uint8_t*>(&position),
+                                      reinterpret_cast<uint8_t*>(&position) + sizeof(int32_t));
+                    
+                    // 添加bucket大小
+                    uint32_t bkt_size = static_cast<uint32_t>(serialized_bkt.size());
+                    request_data.insert(request_data.end(),
+                                      reinterpret_cast<uint8_t*>(&bkt_size),
+                                      reinterpret_cast<uint8_t*>(&bkt_size) + sizeof(uint32_t));
+                    
+                    // 添加bucket数据
+                    request_data.insert(request_data.end(),
+                                      serialized_bkt.begin(),
+                                      serialized_bkt.end());
+                }
+            }
         }
-	}
+        
+        // 发送 WRITE_PATH_FULL 请求
+        std::vector<uint8_t> response_data;
+        std::string error_msg;
+        
+        return sendRequest(WRITE_PATH_FULL, request_data, response_data, error_msg);
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Exception in WritePathFull: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+void ringoram::EvictPath() {
+    int l = G % (1 << L);
+    G += 1;
+    
+    try {
+        // 1. 一次性读取路径上的所有bucket
+        std::vector<bucket> path_buckets = ReadPathFull(l);
+        
+        // 2. 处理读取到的所有bucket
+        for (auto& bkt : path_buckets) {
+            // 将real blocks添加到stash（解密数据）
+            for (int j = 0; j < maxblockEachbkt; j++) {
+                if (bkt.ptrs[j] != -1 && bkt.valids[j] && !bkt.blocks[j].IsDummy()) {
+                    block encrypted_block = bkt.blocks[j];
+                    
+                    // 解密数据
+                    vector<char> decrypted_data = decrypt_data(encrypted_block.GetData());
+                    
+                    // 创建解密后的block对象
+                    block decrypted_block(encrypted_block.GetLeafid(),
+                                          encrypted_block.GetBlockindex(),
+                                          decrypted_data);
+                    
+                    // 添加到stash
+                    stash.push_back(decrypted_block);
+                }
+            }
+        }
+        
+        // 3. 准备要写回的bucket
+        std::vector<bucket> buckets_to_write;
+        
+        for (int i = 0; i <= L; i++) {
+            int position = Path_bucket(l, i);
+            int level = GetlevelFromPos(position);
+            vector<block> blocksTobucket;
+            
+            // 从stash中选择可以放在这个bucket的块
+            for (auto it = stash.begin(); it != stash.end() && blocksTobucket.size() < realBlockEachbkt; ) {
+                int target_leaf = it->GetLeafid();
+                int target_bucket_pos = Path_bucket(target_leaf, level);
+                if (target_bucket_pos == position) {
+                    // 对要写回当前bucket的块进行加密
+                    if (!it->IsDummy()) {
+                        vector<char> plain_data = it->GetData();
+                        vector<char> encrypted_data = encrypt_data(plain_data);
+                        
+                        block encrypted_block(it->GetLeafid(), it->GetBlockindex(), encrypted_data);
+                        blocksTobucket.push_back(encrypted_block);
+                    }
+                    it = stash.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            
+            // 填充dummy块
+            while (blocksTobucket.size() < realBlockEachbkt + dummyBlockEachbkt) {
+                blocksTobucket.push_back(dummyBlock);
+            }
+            
+            // 随机排列
+            std::random_device rd;
+            std::mt19937 g(rd());
+            std::shuffle(blocksTobucket.begin(), blocksTobucket.end(), g);
+            
+            // 创建bucket
+            bucket bktTowrite(realBlockEachbkt, dummyBlockEachbkt);
+            bktTowrite.blocks = blocksTobucket;
+            
+            for (int j = 0; j < maxblockEachbkt; j++) {
+                bktTowrite.ptrs[j] = bktTowrite.blocks[j].GetBlockindex();
+                bktTowrite.valids[j] = 1;
+            }
+            bktTowrite.count = 0;
+            
+            buckets_to_write.push_back(bktTowrite);
+        }
+        
+        // 4. 一次性写入所有bucket
+        WritePathFull(l, buckets_to_write);
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Exception in EvictPath: " << e.what() << std::endl;
+    }
+}
+
+
+// 检查哪些bucket需要earlyshuffle
+std::vector<int> ringoram::CheckNeedEarlyShuffle(int leaf_id) {
+    std::vector<int> positions_needing_shuffle;
+    
+    try {
+        // 1. 准备请求数据
+        std::vector<uint8_t> request_data(sizeof(int32_t));
+        *reinterpret_cast<int32_t*>(request_data.data()) = leaf_id;
+        
+        // 2. 发送 CHECK_NEED_EARLY_SHUFFLE 请求
+        std::vector<uint8_t> response_data;
+        std::string error_msg;
+        
+        if (!sendRequest(CHECK_NEED_EARLY_SHUFFLE, request_data, response_data, error_msg)) {
+            std::cerr << "Failed to check need earlyshuffle: " << error_msg << std::endl;
+            return positions_needing_shuffle;
+        }
+        
+        // 3. 解析响应数据
+        size_t num_positions = response_data.size() / sizeof(int32_t);
+        positions_needing_shuffle.reserve(num_positions);
+        
+        for (size_t i = 0; i < num_positions; i++) {
+            int32_t position = *reinterpret_cast<const int32_t*>(
+                response_data.data() + i * sizeof(int32_t)
+            );
+            positions_needing_shuffle.push_back(position);
+        }
+        
+        // if (!positions_needing_shuffle.empty()) {
+        //     std::cout << "[Client] Found " << positions_needing_shuffle.size() 
+        //              << " buckets needing earlyshuffle for leaf " << leaf_id << std::endl;
+        // }
+        
+        return positions_needing_shuffle;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Exception in CheckNeedEarlyShuffle: " << e.what() << std::endl;
+        return positions_needing_shuffle;
+    }
+}
+
+// void ringoram::EarlyReshuffle(int leaf_id) {
+//     // 1. 先检查哪些bucket需要earlyshuffle
+//     std::vector<int> positions_to_shuffle = CheckNeedEarlyShuffle(leaf_id);
+    
+//     if (positions_to_shuffle.empty()) {
+//         // std::cout << "[EarlyReshuffle] No buckets need reshuffle for leaf " 
+//         //          << leaf_id << std::endl;
+//         return;
+//     }
+   
+//     // 2. 对每个需要reshuffle的bucket进行处理
+//     for (int position : positions_to_shuffle) {
+//         try {
+//             int level = GetlevelFromPos(position);
+            
+//             // 3. 读取bucket
+//             bucket bkt = Read_bucket(position);
+            
+//             // 再次确认需要reshuffle（防止竞态条件）
+//             if (bkt.count >= dummyBlockEachbkt) {
+                
+//                 // 4. 将有效块添加到stash（解密）
+//                 for (int j = 0; j < maxblockEachbkt; j++) {
+//                     if (bkt.ptrs[j] != -1 && bkt.valids[j] && !bkt.blocks[j].IsDummy()) {
+//                         block encrypted_block = bkt.blocks[j];
+                        
+//                         // 解密数据
+//                         vector<char> decrypted_data = decrypt_data(encrypted_block.GetData());
+                        
+//                         // 创建解密后的block对象
+//                         block decrypted_block(encrypted_block.GetLeafid(),
+//                                               encrypted_block.GetBlockindex(),
+//                                               decrypted_data);
+                        
+//                         // 添加到stash
+//                         stash.push_back(decrypted_block);
+//                     }
+//                 }
+                     
+//                 //  写回bucket
+//                 WriteBucket(position);
+                
+//             } 
+            
+//         } catch (const std::exception& e) {
+//             std::cerr << "  Error processing bucket at position " 
+//                      << position << ": " << e.what() << std::endl;
+//         }
+//     }
+    
+//     // std::cout << "[EarlyReshuffle] Completed for leaf " << leaf_id << std::endl;
+// }
+
+void ringoram::EarlyReshuffle(int leaf_id) {
+    try {
+        // std::cout << "[EarlyReshuffle] Processing leaf " << leaf_id << std::endl;
+        
+        // 1. 一次性：检查哪些bucket需要reshuffle并获取数据
+        std::vector<uint8_t> request_data(sizeof(int32_t));
+        *reinterpret_cast<int32_t*>(request_data.data()) = leaf_id;
+        
+        std::vector<uint8_t> response_data;
+        std::string error_msg;
+        
+        if (!sendRequest(CHECK_NEED_EARLY_SHUFFLE_WITH_DATA, request_data, response_data, error_msg)) {
+            std::cerr << "Failed to check need earlyshuffle with data: " << error_msg << std::endl;
+            return;
+        }
+        
+        if (response_data.empty()) {
+            // std::cout << "[EarlyReshuffle] No buckets need reshuffle" << std::endl;
+            return;
+        }
+        
+        // 2. 解析获取到的bucket数据
+        size_t offset = 0;
+        std::vector<std::pair<int, bucket>> buckets_to_process;
+        
+        while (offset < response_data.size()) {
+            if (offset + 8 > response_data.size()) break;
+            
+            // 读取位置
+            int32_t position = *reinterpret_cast<const int32_t*>(response_data.data() + offset);
+            offset += sizeof(int32_t);
+            
+            // 读取bucket大小
+            uint32_t bucket_size = *reinterpret_cast<const uint32_t*>(response_data.data() + offset);
+            offset += sizeof(uint32_t);
+            
+            if (offset + bucket_size > response_data.size()) break;
+            
+            // 反序列化bucket
+            bucket bkt = deserialize_bucket(response_data.data() + offset, bucket_size);
+            offset += bucket_size;
+            
+            buckets_to_process.emplace_back(position, bkt);
+        }
+        
+        // std::cout << "[EarlyReshuffle] Found " << buckets_to_process.size() 
+        //           << " buckets needing reshuffle" << std::endl;
+        
+        // 3. 处理每个需要reshuffle的bucket
+        std::vector<std::pair<int, bucket>> buckets_to_write;
+        
+        for (auto& [position, bkt] : buckets_to_process) {
+            int level = GetlevelFromPos(position);
+            
+            // 将有效块添加到stash（解密）
+            for (int j = 0; j < maxblockEachbkt; j++) {
+                if (bkt.ptrs[j] != -1 && bkt.valids[j] && !bkt.blocks[j].IsDummy()) {
+                    block encrypted_block = bkt.blocks[j];
+                    
+                    // 解密数据
+                    vector<char> decrypted_data = decrypt_data(encrypted_block.GetData());
+                    
+                    // 创建解密后的block对象
+                    block decrypted_block(encrypted_block.GetLeafid(),
+                                          encrypted_block.GetBlockindex(),
+                                          decrypted_data);
+                    
+                    // 添加到stash
+                    stash.push_back(decrypted_block);
+                }
+            }
+            
+            // 准备要写回的blocks
+            vector<block> blocksToBucket;
+            
+            // 从stash中选择可以放在这个bucket的块
+            for (auto it = stash.begin(); it != stash.end() && blocksToBucket.size() < realBlockEachbkt; ) {
+                int target_leaf = it->GetLeafid();
+                int target_bucket_pos = Path_bucket(target_leaf, level);
+                
+                if (target_bucket_pos == position) {
+                    // 对要写回当前bucket的块进行加密
+                    if (!it->IsDummy()) {
+                        vector<char> plain_data = it->GetData();
+                        vector<char> encrypted_data = encrypt_data(plain_data);
+                        
+                        block encrypted_block(it->GetLeafid(), it->GetBlockindex(), encrypted_data);
+                        blocksToBucket.push_back(encrypted_block);
+                    } else {
+                        blocksToBucket.push_back(*it);
+                    }
+                    it = stash.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            
+            // 填充dummy块
+            while (blocksToBucket.size() < realBlockEachbkt + dummyBlockEachbkt) {
+                blocksToBucket.push_back(dummyBlock);
+            }
+            
+            // 随机排列
+            std::random_device rd;
+            std::mt19937 g(rd());
+            std::shuffle(blocksToBucket.begin(), blocksToBucket.end(), g);
+            
+            // 创建新的bucket
+            bucket new_bkt(realBlockEachbkt, dummyBlockEachbkt);
+            new_bkt.blocks = blocksToBucket;
+            
+            for (int j = 0; j < maxblockEachbkt; j++) {
+                new_bkt.ptrs[j] = new_bkt.blocks[j].GetBlockindex();
+                new_bkt.valids[j] = 1;
+            }
+            new_bkt.count = 0;
+            
+            buckets_to_write.emplace_back(position, new_bkt);
+        }
+        
+        // 4. 一次性写回所有bucket
+        if (!buckets_to_write.empty()) {
+            // 准备请求数据
+            std::vector<uint8_t> write_request_data;
+            
+            for (auto& [position, bkt] : buckets_to_write) {
+                // 序列化bucket
+                std::vector<uint8_t> serialized_bkt = serialize_bucket(bkt);
+                
+                if (!serialized_bkt.empty()) {
+                    // 添加位置信息
+                    write_request_data.insert(write_request_data.end(),
+                                            reinterpret_cast<uint8_t*>(&position),
+                                            reinterpret_cast<uint8_t*>(&position) + sizeof(int32_t));
+                    
+                    // 添加bucket大小
+                    uint32_t bkt_size = static_cast<uint32_t>(serialized_bkt.size());
+                    write_request_data.insert(write_request_data.end(),
+                                            reinterpret_cast<uint8_t*>(&bkt_size),
+                                            reinterpret_cast<uint8_t*>(&bkt_size) + sizeof(uint32_t));
+                    
+                    // 添加bucket数据
+                    write_request_data.insert(write_request_data.end(),
+                                            serialized_bkt.begin(),
+                                            serialized_bkt.end());
+                }
+            }
+            
+            // 发送批量写入请求
+            std::vector<uint8_t> write_response;
+            if (!sendRequest(WRITE_BUCKETS, write_request_data, write_response, error_msg)) {
+                std::cerr << "Failed to write buckets: " << error_msg << std::endl;
+            } 
+        }
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Exception in EarlyReshuffle: " << e.what() << std::endl;
+    }
 }
 
 std::vector<char> ringoram::encrypt_data(const std::vector<char>& data)

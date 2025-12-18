@@ -93,46 +93,83 @@ int IRTree::createNewNode(Node::Type type, int level, const MBR& mbr) {
 }
 
 
-double IRTree::computeNodeRelevance(std::shared_ptr<Node> node, const std::vector<std::string>& keywords, const MBR& spatial_scope, double alpha) const
+
+double IRTree::computeNodeRelevance(std::shared_ptr<Node> node, 
+                                   const std::vector<std::string>& keywords,
+                                   const MBR& spatial_scope, 
+                                   double alpha) const
 {
     if (!node) return 0.0;
 
-    // 计算空间相关性
+    // === 1. 改进的空间相关性计算 ===
     double spatial_rel = computeSpatialRelevance(node->getMBR(), spatial_scope);
     if (spatial_rel == 0.0) return 0.0;
 
-    // 计算文本相关性
+    // === 2. 改进的文本相关性上界 ===
     double text_upper_bound = 0.0;
     int total_docs = global_index.getTotalDocuments();
-    int valid_keywords = 0;
+    int matched_keywords = 0;
 
+    // 预计算查询词的全局文档频率
+    std::vector<double> keyword_weights;
     for (const auto& keyword : keywords) {
-        // 获取节点中该词的最大词频（使用你已有的TF_max）
-        int tf_max = node->getMaxTermFrequency(keyword);
-        if (tf_max == 0) continue;  // 节点中没有这个词，跳过
-
-        // 获取全局文档频率
         int term_id = vocab.getTermId(keyword);
-        if (term_id == -1) continue;  // 词汇表中不存在
-
+        if (term_id == -1) {
+            keyword_weights.push_back(0.0);
+            continue;
+        }
+        
         int global_df = global_index.getDocumentFrequency(term_id);
-        if (global_df == 0) continue;
-
-        // 计算该词在节点中可能达到的最大TF-IDF值
-        double max_tfidf = Vector::computeTFIDFWeight(tf_max, global_df, total_docs);
-        text_upper_bound += max_tfidf;
-        valid_keywords++;
+        if (global_df == 0) {
+            keyword_weights.push_back(0.0);
+            continue;
+        }
+        
+        // IDF权重（对数形式）
+        double idf_weight = log((total_docs + 1.0) / (global_df + 1.0));
+        keyword_weights.push_back(idf_weight);
     }
 
-    // 如果没有匹配的关键词，文本相关性为0
-    if (valid_keywords == 0) return 0.0;
+    // 计算节点中每个查询词的最大可能TF-IDF
+    for (size_t i = 0; i < keywords.size(); i++) {
+        const auto& keyword = keywords[i];
+        double idf_weight = keyword_weights[i];
+        if (idf_weight <= 0.0) continue; // 跳过无效关键词
 
-    // 归一化到[0,1]范围 - 除以查询词数量
-    text_upper_bound = std::min(1.0, text_upper_bound / keywords.size());
+        // 获取节点中该词的最大词频
+        int tf_max = node->getMaxTermFrequency(keyword);
+        if (tf_max == 0) continue;
 
-   
-    //计算综合相关性
+        // 获取节点中该词的文档频率
+        int node_df = node->getDocumentFrequency(keyword);
+        
+        // 改进：考虑节点内文档频率的影响
+        // 如果节点中只有少量文档包含该词，降低权重
+        double node_df_factor = (node_df > 0) ? 
+            std::min(1.0, log(1.0 + node_df) / log(2.0)) : 0.0;
+        
+        // 计算更精确的TF-IDF上界
+        double max_tfidf = tf_max * idf_weight * node_df_factor;
+        text_upper_bound += max_tfidf;
+        matched_keywords++;
+    }
+
+    // 归一化文本相关性上界
+    if (matched_keywords > 0) {
+        // 更保守的归一化：除以关键词数量和最大TF的平方根
+        text_upper_bound = text_upper_bound / (keywords.size() * sqrt(10.0));
+        text_upper_bound = std::min(1.0, text_upper_bound);
+    } else {
+        return 0.0; // 没有匹配的关键词
+    }
+
+    // === 3. 综合相关性 ===
     double joint_relevance = computeJointRelevance(text_upper_bound, spatial_rel, alpha);
+    
+    // 额外的剪枝：如果空间相关性很低，且alpha不偏向空间，降低分数
+    if (spatial_rel < 0.1 && alpha < 0.3) {
+        joint_relevance *= 0.5; // 惩罚低空间相关性
+    }
 
     return joint_relevance;
 }
@@ -141,123 +178,156 @@ void IRTree::processLeafNode(std::shared_ptr<Node> leaf_node,
     const std::vector<std::string>& keywords,
     const MBR& spatial_scope,
     double alpha,
-    std::vector<TreeHeapEntry>& results) const {
-
-
-
+    std::vector<TreeHeapEntry>& results,
+    int k,                    // 最大结果数
+    double threshold) const { // 当前阈值
+    
     if (!leaf_node || leaf_node->getType() != Node::LEAF) {
-
         return;
+    }
+
+    // 设置关键词匹配阈值（30%）
+    const double KEYWORD_MATCH_THRESHOLD = 0.3;
+    int min_keywords_needed = std::max(1, (int)(keywords.size() * KEYWORD_MATCH_THRESHOLD));
+    
+    // ============ 快速预检查 ============
+    // 1. 检查叶子节点MBR是否与查询范围重叠
+    if (!leaf_node->getMBR().overlaps(spatial_scope)) {
+        return; // 整个叶子节点都不在范围内
+    }
+    
+    // 2. 快速文本过滤：检查叶子节点是否至少包含30%的查询关键词
+    int keyword_match_count = 0;
+    for (const auto& keyword : keywords) {
+        if (leaf_node->getDocumentFrequency(keyword) > 0) {
+            keyword_match_count++;
+            if (keyword_match_count >= min_keywords_needed) {
+                break; // 达到阈值，无需继续检查
+            }
+        }
+    }
+    if (keyword_match_count < min_keywords_needed) {
+        return; // 不满足最低关键词匹配要求
     }
 
     auto documents = leaf_node->getDocuments();
-
-
-    // 遍历叶子节点中的所有文档
+    int found_count = 0;
+    int checked_count = 0;
+    
+    // ============ 预计算查询词的IDF ============
+    std::vector<double> keyword_idf;
+    int total_docs = global_index.getTotalDocuments();
+    
+    for (const auto& keyword : keywords) {
+        int term_id = vocab.getTermId(keyword);
+        if (term_id == -1) {
+            keyword_idf.push_back(0.0);
+            continue;
+        }
+        int df = global_index.getDocumentFrequency(term_id);
+        if (df == 0) {
+            keyword_idf.push_back(0.0);
+            continue;
+        }
+        double idf = log((total_docs + 1.0) / (df + 1.0));
+        keyword_idf.push_back(idf);
+    }
+    
+    // ============ 收集文档和分数 ============
+    std::vector<TreeHeapEntry> leaf_results; // 临时存储
+    
     for (const auto& doc : documents) {
-
-
-        // 检查空间相关性 - 文档位置是否在查询范围内
-        bool spatial_overlap = doc->getLocation().overlaps(spatial_scope);
-
-
-        if (!spatial_overlap) {
-
+        checked_count++;
+        
+        // 1. 快速空间过滤（精确检查）
+        if (!doc->getLocation().overlaps(spatial_scope)) {
             continue;
         }
-
-        // 检查文本相关性 - 文档是否包含所有查询关键词
-        bool has_all_keywords = true;
-        for (const auto& keyword : keywords) {
+        
+        // 2. 计算匹配的关键词数量和分数
+        int matched_keywords = 0;
+        double text_score = 0.0;
+        
+        for (size_t i = 0; i < keywords.size(); i++) {
+            const auto& keyword = keywords[i];
             int tf = doc->getTermFrequency(keyword);
-
-            if (tf == 0) {
-                has_all_keywords = false;
-                break;
+            if (tf > 0 && keyword_idf[i] > 0) {
+                matched_keywords++;
+                text_score += tf * keyword_idf[i];
             }
         }
-
-
-
-        // 如果满足空间和文本条件，计算综合相关性并加入结果
-        if (has_all_keywords) {
-            double spatial_rel = computeSpatialRelevance(doc->getLocation(), spatial_scope);
-            double text_rel = computeTextRelevance(*doc, keywords);
-            double joint_rel = computeJointRelevance(text_rel, spatial_rel, alpha);
-
-
-
-            results.push_back(TreeHeapEntry(doc, joint_rel));
+        
+        // 检查是否满足最低匹配要求
+        if (matched_keywords < min_keywords_needed) {
+            continue; // 不满足30%匹配要求
         }
-
+        
+        // 3. 计算空间相关性
+        double spatial_rel = computeSpatialRelevance(doc->getLocation(), spatial_scope);
+        if (spatial_rel == 0.0) continue;
+        
+        // 4. 归一化文本分数
+        double normalized_text = 0.0;
+        if (matched_keywords > 0) {
+            // 归一化到[0,1]范围，考虑匹配关键词比例
+            double tfidf_max = text_score;
+            double match_ratio = (double)matched_keywords / keywords.size();
+            
+            // 如果只匹配部分关键词，适当降低分数
+            normalized_text = (tfidf_max / (keywords.size() * 10.0)) * match_ratio;
+            normalized_text = std::min(1.0, normalized_text);
+        }
+        
+        // 5. 计算综合分数
+        double joint_rel = computeJointRelevance(normalized_text, spatial_rel, alpha);
+        
+        // 6. 阈值剪枝
+        if (joint_rel < threshold && results.size() >= k) {
+            continue; // 分数低于当前阈值，剪枝
+        }
+        
+        // 7. 添加到临时结果
+        leaf_results.push_back(TreeHeapEntry(doc, joint_rel));
+        found_count++;
+        
+        // 可选：如果叶子节点内找到太多文档，可以提前终止
+        if (found_count > 10 && results.size() >= k) {
+            break; // 已经有一些结果，避免过度检查
+        }
+    }
+    
+    // ============ 合并结果 ============
+    if (!leaf_results.empty()) {
+        // 按分数排序（降序）
+        std::sort(leaf_results.begin(), leaf_results.end(),
+            [](const TreeHeapEntry& a, const TreeHeapEntry& b) {
+                return a.score > b.score;
+            });
+        
+        // 计算还能添加多少结果
+        int remaining_slots = k - results.size();
+        if (remaining_slots <= 0) return; // 结果已满
+        
+        // 添加高质量结果
+        int to_add = std::min(remaining_slots, (int)leaf_results.size());
+        for (int i = 0; i < to_add; i++) {
+            results.push_back(leaf_results[i]);
+        }
+        
+        // 如果添加了新结果，可能需要重新排序
+        if (to_add > 0 && results.size() >= k) {
+            std::sort(results.begin(), results.end(),
+                [](const TreeHeapEntry& a, const TreeHeapEntry& b) {
+                    return a.score > b.score;
+                });
+            // 如果超过k，只保留前k个
+            if (results.size() > k) {
+                results.resize(k);
+            }
+        }
     }
 }
 
-void IRTree::processInternalNode(std::shared_ptr<Node> internal_node,
-    const std::vector<std::string>& keywords,
-    const MBR& spatial_scope,
-    double alpha,
-    std::priority_queue<TreeHeapEntry,
-    std::vector<TreeHeapEntry>,
-    TreeHeapComparator>& queue) const {
-
-    if (internal_node == nullptr || internal_node->getType() != Node::INTERNAL) {
-
-        return;
-    }
-
-    // 内部节点存储的是子节点ID，需要从存储中加载
-    auto child_nodes = internal_node->getChildNodes();
-
-    for (const auto& child_node_ptr : child_nodes) {
-        int child_id = child_node_ptr->getId();
-
-
-        auto child_node = loadNode(child_id);  // 从存储加载实际节点
-
-        if (child_node == nullptr) {
-
-            continue;
-        }
-
-        // 检查空间重叠 - 子节点MBR是否与查询范围重叠
-        bool overlaps = child_node->getMBR().overlaps(spatial_scope);
-
-        if (!overlaps) {
-            // 无空间重叠，跳过该子节点
-
-            continue;
-        }
-
-        // 检查文本相关性 - 子节点是否包含相关关键词
-        bool has_relevant_keywords = false;
-        for (const auto& keyword : keywords) {
-            if (child_node->getDocumentFrequency(keyword) > 0) {
-                has_relevant_keywords = true;
-                break;
-            }
-        }
-
-
-
-        if (!has_relevant_keywords) {
-
-            continue;
-        }
-
-        // 计算子节点相关性并加入优先队列
-        double relevance = computeNodeRelevance(child_node, keywords, spatial_scope, alpha);
-
-
-        if (relevance > 0) {
-            queue.push(TreeHeapEntry(child_node, relevance));
-
-        }
-
-    }
-}
-
-// 使用路径处理内部节点（新方法）
 void IRTree::processInternalNodeWithPath(std::shared_ptr<Node> internal_node,
     int parent_path,
     const std::vector<std::string>& keywords,
@@ -269,45 +339,153 @@ void IRTree::processInternalNodeWithPath(std::shared_ptr<Node> internal_node,
         return;
     }
 
+    // 预检查1：节点MBR是否与查询范围重叠
+    if (!internal_node->getMBR().overlaps(spatial_scope)) {
+        return; // 完全无空间重叠，跳过整个子树
+    }
+
+    // 预检查2：节点是否包含任何查询关键词
+    bool has_potential_keywords = false;
+    for (const auto& keyword : keywords) {
+        if (internal_node->getDocumentFrequency(keyword) > 0) {
+            has_potential_keywords = true;
+            break;
+        }
+    }
+    
+    if (!has_potential_keywords) {
+        return; // 完全不包含查询关键词，跳过
+    }
+
+    // 计算节点的相关性上界（用于排序和初步剪枝）
+    double node_upper_bound = computeNodeRelevance(internal_node, keywords, spatial_scope, alpha);
+   
     // 从父节点中获取子节点的位置映射
     const auto& child_position_map = internal_node->getChildPositionMap();
-
+    
+    // 子节点统计，用于智能排序
+    struct ChildInfo {
+        int child_id;
+        int child_path;
+        double estimated_relevance;
+        int keyword_overlap; // 匹配的关键词数量
+    };
+    
+    std::vector<ChildInfo> child_infos;
+    
+    // 第一轮：快速收集子节点信息
     for (const auto& pos_pair : child_position_map) {
         int child_id = pos_pair.first;
         int child_path = pos_pair.second;
 
         // 使用路径访问子节点
         auto child_node = accessNodeByPath(child_path);
-        if (!child_node) {
-            std::cerr << "Failed to load child node " << child_id << " using path " << child_path << std::endl;
+        if (!child_node) continue;
+
+        // 快速空间过滤
+        if (!child_node->getMBR().overlaps(spatial_scope)) {
             continue;
         }
 
-        // 检查空间重叠
-        bool overlaps = child_node->getMBR().overlaps(spatial_scope);
-        if (!overlaps) {
-            continue;
-        }
-
-        // 检查文本相关性
-        bool has_relevant_keywords = false;
+        // 快速文本过滤：统计匹配的关键词数量
+        int keyword_overlap = 0;
         for (const auto& keyword : keywords) {
             if (child_node->getDocumentFrequency(keyword) > 0) {
-                has_relevant_keywords = true;
-                break;
+                keyword_overlap++;
             }
         }
-        if (!has_relevant_keywords) {
-            continue;
+        
+        if (keyword_overlap == 0) {
+            continue; // 没有匹配的关键词
         }
 
-        // 计算子节点相关性并加入优先队列（包含路径信息）
+        // 快速估计相关性（简化计算）
+        double spatial_overlap = 0.0;
+        if (child_node->getMBR().overlaps(spatial_scope)) {
+            spatial_overlap = 0.5; // 保守估计
+            if (spatial_scope.contains(child_node->getMBR())) {
+                spatial_overlap = 1.0;
+            }
+        }
+        
+        double estimated_rel = alpha * (keyword_overlap / (double)keywords.size()) 
+                             + (1 - alpha) * spatial_overlap;
+
+        child_infos.push_back({child_id, child_path, estimated_rel, keyword_overlap});
+    }
+
+    // 按估计相关性排序子节点（高相关性先处理）
+    std::sort(child_infos.begin(), child_infos.end(),
+        [](const ChildInfo& a, const ChildInfo& b) {
+            return a.estimated_relevance > b.estimated_relevance;
+        });
+
+    // 第二轮：计算精确相关性并加入队列
+    for (const auto& child_info : child_infos) {
+        // 重新加载子节点（因为可能被修改）
+        auto child_node = accessNodeByPath(child_info.child_path);
+        if (!child_node) continue;
+
+        // 计算更精确的相关性
         double relevance = computeNodeRelevance(child_node, keywords, spatial_scope, alpha);
+        
         if (relevance > 0) {
-            queue.push(TreeHeapEntry(child_node, child_path, relevance));
+            queue.push(TreeHeapEntry(child_node, child_info.child_path, relevance));
         }
     }
 }
+
+// // 使用路径处理内部节点（新方法）
+// void IRTree::processInternalNodeWithPath(std::shared_ptr<Node> internal_node,
+//     int parent_path,
+//     const std::vector<std::string>& keywords,
+//     const MBR& spatial_scope,
+//     double alpha,
+//     std::priority_queue<TreeHeapEntry, std::vector<TreeHeapEntry>, TreeHeapComparator>& queue) {
+
+//     if (!internal_node || internal_node->getType() != Node::INTERNAL) {
+//         return;
+//     }
+
+//     // 从父节点中获取子节点的位置映射
+//     const auto& child_position_map = internal_node->getChildPositionMap();
+
+//     for (const auto& pos_pair : child_position_map) {
+//         int child_id = pos_pair.first;
+//         int child_path = pos_pair.second;
+
+//         // 使用路径访问子节点
+//         auto child_node = accessNodeByPath(child_path);
+//         if (!child_node) {
+//             std::cerr << "Failed to load child node " << child_id << " using path " << child_path << std::endl;
+//             continue;
+//         }
+
+//         // 检查空间重叠
+//         bool overlaps = child_node->getMBR().overlaps(spatial_scope);
+//         if (!overlaps) {
+//             continue;
+//         }
+
+//         // 检查文本相关性
+//         bool has_relevant_keywords = false;
+//         for (const auto& keyword : keywords) {
+//             if (child_node->getDocumentFrequency(keyword) > 0) {
+//                 has_relevant_keywords = true;
+//                 break;
+//             }
+//         }
+//         if (!has_relevant_keywords) {
+//             continue;
+//         }
+
+//         // 计算子节点相关性并加入优先队列（包含路径信息）
+//         double relevance = computeNodeRelevance(child_node, keywords, spatial_scope, alpha);
+//         if (relevance > 0) {
+//             queue.push(TreeHeapEntry(child_node, child_path, relevance));
+//         }
+//     }
+// }
 
 double IRTree::computeTextRelevance(const Document& doc, const std::vector<std::string>& query_terms) const
 {
@@ -339,29 +517,70 @@ double IRTree::computeTextRelevance(const Document& doc, const std::vector<std::
 }
 
 double IRTree::computeSpatialRelevance(const MBR& doc_location, const MBR& query_scope) const {
-    // 首先检查是否重叠
+    // 1. 检查是否重叠（基本过滤）
     if (!doc_location.overlaps(query_scope)) {
         return 0.0;
     }
 
-    // 计算重叠区域的面积比例（多维度的乘积）
+    // 2. 对于点位置文档（小MBR），使用距离倒数
+    double doc_area = doc_location.area();
+    double query_area = query_scope.area();
+    
+    // 如果文档位置近似为点
+    if (doc_area < 0.0001) { // 很小的面积
+        // 计算中心点距离
+        std::vector<double> doc_center = doc_location.getCenter();
+        std::vector<double> query_center = query_scope.getCenter();
+        
+        // 计算欧氏距离
+        double distance = 0.0;
+        for (size_t i = 0; i < doc_center.size(); i++) {
+            double diff = doc_center[i] - query_center[i];
+            distance += diff * diff;
+        }
+        distance = sqrt(distance);
+        
+        // 如果文档中心在查询范围内，返回1.0；否则返回距离倒数
+        if (query_scope.contains(doc_location)) {
+            return 1.0;
+        } else {
+            // 归一化距离：除以查询范围对角线长度
+            double diag_length = 0.0;
+            for (size_t i = 0; i < query_scope.getMin().size(); i++) {
+                double diff = query_scope.getMax()[i] - query_scope.getMin()[i];
+                diag_length += diff * diff;
+            }
+            diag_length = sqrt(diag_length);
+            
+            if (diag_length == 0) return 0.0;
+            double normalized_dist = distance / diag_length;
+            return 1.0 / (1.0 + normalized_dist);
+        }
+    }
+    
+    // 3. 对于区域文档，计算重叠比例（原来的方法）
     double overlap_area = 1.0;
     for (size_t i = 0; i < doc_location.getMin().size(); i++) {
         double overlap_min = std::max(doc_location.getMin()[i], query_scope.getMin()[i]);
         double overlap_max = std::min(doc_location.getMax()[i], query_scope.getMax()[i]);
-
+        
         if (overlap_min >= overlap_max) {
-            return 0.0; // 没有重叠
+            return 0.0;
         }
-
-        overlap_area *= (overlap_max - overlap_min);  // 计算每个维度的重叠长度
+        overlap_area *= (overlap_max - overlap_min);
     }
 
-    double doc_area = doc_location.area();
-    if (doc_area == 0) return 1.0;  // 文档面积为0时返回最大值
-
-    // 返回重叠面积比例
-    return overlap_area / doc_area;
+    if (doc_area == 0) return 1.0;
+    
+    // 返回重叠比例，但对小重叠进行惩罚
+    double overlap_ratio = overlap_area / doc_area;
+    
+    // 如果重叠比例很小，降低分数
+    if (overlap_ratio < 0.1) {
+        overlap_ratio *= 0.3; // 惩罚小重叠
+    }
+    
+    return overlap_ratio;
 }
 
 double IRTree::computeJointRelevance(double text_relevance, double spatial_relevance, double alpha) const
@@ -808,7 +1027,23 @@ std::vector<TreeHeapEntry> IRTree::search(const Query& query)
     return search(query.getKeywords(), query.getSpatialScope(), query.getK(), query.getAlpha());
 }
 
-// 使用递归位置映射的搜索实现
+
+int IRTree::getChildPath(std::shared_ptr<Node> parent_node, int child_id) const {
+    if (!parent_node) {
+        return -1; // 无效路径
+    }
+    
+    // 方法1: 从节点的子节点位置映射中查找
+    const auto& child_position_map = parent_node->getChildPositionMap();
+    auto it = child_position_map.find(child_id);
+    if (it != child_position_map.end()) {
+        return it->second; // 返回存储的路径
+    }
+    
+    return -1; // 未找到路径
+}
+
+
 std::vector<TreeHeapEntry> IRTree::search(const std::vector<std::string>& keywords,
     const MBR& spatial_scope,
     int k,
@@ -821,7 +1056,6 @@ std::vector<TreeHeapEntry> IRTree::search(const std::vector<std::string>& keywor
         return results;
     }
 
-
     // 获取根节点路径
     int root_path = getRootPath();
     if (root_path == -1) {
@@ -829,17 +1063,17 @@ std::vector<TreeHeapEntry> IRTree::search(const std::vector<std::string>& keywor
         return results;
     }
 
-    // 加载根节点（使用路径访问）
+    // 加载根节点
     auto root_node = accessNodeByPath(root_path);
     if (!root_node) {
         std::cerr << "Failed to load root node using path " << root_path << std::endl;
         return results;
     }
 
-    // 使用优先队列进行最佳优先搜索（现在包含路径信息）
+    // 使用优先队列（只存储节点，不存储文档）
     std::priority_queue<TreeHeapEntry, std::vector<TreeHeapEntry>, TreeHeapComparator> queue;
 
-    // 计算根节点的相关性并加入队列（包含路径信息）
+    // 计算根节点相关性
     double root_relevance = computeNodeRelevance(root_node, keywords, spatial_scope, alpha);
     if (root_relevance > 0) {
         queue.push(TreeHeapEntry(root_node, root_path, root_relevance));
@@ -847,53 +1081,106 @@ std::vector<TreeHeapEntry> IRTree::search(const std::vector<std::string>& keywor
 
     int nodes_visited = 0;
     int documents_checked = 0;
+    double threshold = 0.0;
+    int pruned_nodes = 0;
+    int pruned_leaves = 0;
 
-    // 最佳优先搜索主循环
+    // ============ 关键修改：更灵活的循环条件 ============
     while (!queue.empty() && results.size() < k) {
         TreeHeapEntry current = queue.top();
         queue.pop();
         nodes_visited++;
 
-        if (current.isData()) {
-            // 找到文档，加入结果
-            results.push_back(current);
+        auto node = current.node; // 确保current总是节点
+        
+        // ============ 节点剪枝 ============
+        if (results.size() > 0 && current.score < threshold * 0.9) {
+            pruned_nodes++;
+            continue;
         }
-        else if (current.isNode()) {
-            auto node = current.node;
 
-            if (node->getType() == Node::LEAF) {
-                // 处理叶子节点 - 检查实际文档
-                int prev_results = results.size();
-                processLeafNode(node, keywords, spatial_scope, alpha, results);
-                documents_checked += (results.size() - prev_results);
+        if (node->getType() == Node::LEAF) {
+            // ============ 叶子节点处理 ============
+            // 快速预检查
+            if (!node->getMBR().overlaps(spatial_scope)) {
+                continue; // 无空间重叠
             }
-            else {
-                // 处理内部节点 - 使用递归位置映射获取子节点
-                processInternalNodeWithPath(node, current.path, keywords, spatial_scope, alpha, queue);
+            
+            // 检查关键词匹配（30%阈值）
+            bool has_potential = false;
+            int keyword_match = 0;
+            const double KEYWORD_THRESHOLD = 0.3;
+            int min_needed = std::max(1, (int)(keywords.size() * KEYWORD_THRESHOLD));
+            
+            for (const auto& keyword : keywords) {
+                if (node->getDocumentFrequency(keyword) > 0) {
+                    keyword_match++;
+                    if (keyword_match >= min_needed) {
+                        has_potential = true;
+                        break;
+                    }
+                }
             }
+            
+            if (!has_potential) {
+                pruned_leaves++;
+                continue;
+            }
+            
+            // 计算叶子上界
+            double leaf_upper_bound = computeNodeRelevance(node, keywords, spatial_scope, alpha);
+            if (results.size() > 0 && leaf_upper_bound < threshold * 0.8) {
+                pruned_leaves++;
+                continue;
+            }
+            
+            // 处理叶子节点中的文档
+            int prev_results = results.size();
+            processLeafNode(node, keywords, spatial_scope, alpha, results, k, threshold);
+            documents_checked += (results.size() - prev_results);
+            
+            // 如果达到k个结果，更新阈值
+            if (results.size() >= k) {
+                // 使用最小堆维护top-k
+                std::make_heap(results.begin(), results.end(), 
+                    [](const TreeHeapEntry& a, const TreeHeapEntry& b) {
+                        return a.score > b.score; // 最小堆
+                    });
+                threshold = results.front().score; // 最小分数
+                
+                // 注意：可以在此考虑提前终止
+                // 如果队列中最高分 < threshold，可以提前结束
+                if (!queue.empty() && queue.top().score < threshold) {
+                    break;
+                }
+            }
+        }
+        else {
+            // ============ 内部节点处理 ============
+            processInternalNodeWithPath(node, current.path, keywords, 
+                                       spatial_scope, alpha, queue);
         }
     }
 
-    search_blocks = nodes_visited * (OramL -cacheLevel);
-    // 排序结果
+    search_blocks = nodes_visited * (OramL - cacheLevel);
+    
+    // 最终排序（降序）
     std::sort(results.begin(), results.end(),
         [](const TreeHeapEntry& a, const TreeHeapEntry& b) {
             return a.score > b.score;
         });
 
-    // 只返回前k个结果
-    if (results.size() > k) {
-        results.resize(k);
+    // ============ 统计输出 ============
+    if (nodes_visited > 0) {
+        std::cout << "=== SEARCH STATISTICS ===" << std::endl;
+        std::cout << "  Total nodes visited: " << nodes_visited << std::endl;
+        std::cout << "  Final results: " << results.size() << std::endl;
     }
-
-    std::cout << "=== SEARCH COMPLETED ===" << std::endl;
-    std::cout << "  Nodes visited: " << nodes_visited << std::endl;
-    std::cout << "  Blocks accessed: " << search_blocks << endl;
-    std::cout << "  Documents checked: " << documents_checked << std::endl;
-    std::cout << "  Final results: " << results.size() << std::endl;
 
     return results;
 }
+
+
 
 void IRTree::bulkInsertFromFile(const std::string& filename) {
     std::ifstream file(filename);
@@ -1370,3 +1657,4 @@ std::chrono::nanoseconds IRTree::getRunTime(const std::string& query_keywords, c
 
     return duration;
 }
+

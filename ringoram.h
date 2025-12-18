@@ -35,7 +35,7 @@ public:
 
 	enum Operation { READ, WRITE };
 	 ringoram(int n, const std::string& server_ip, int server_port, int cache_levels = cacheLevel);
-    // ~ringoram();
+    ~ringoram();
 
     // 网络初始化
     void initNetwork();
@@ -54,7 +54,10 @@ public:
 	void WriteBucket(int position);
 
 	block ReadPath(int leafid, int blockindex);
+	std::vector<bucket> ReadPathFull(int leaf_id);
+	bool WritePathFull(int leaf_id, const std::vector<bucket>& buckets_to_write);
 	void EvictPath();
+	std::vector<int> CheckNeedEarlyShuffle(int leaf_id);
 	void EarlyReshuffle(int l);
 
 	// === 数据加密与解密 ===

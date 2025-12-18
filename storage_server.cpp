@@ -19,6 +19,11 @@ enum RequestType {
     READ_BUCKET = 1,
     WRITE_BUCKET = 2,
     READ_PATH = 3,
+    READ_PATH_FULL = 4,      
+    WRITE_PATH_FULL = 5,
+    CHECK_NEED_EARLY_SHUFFLE = 6,  
+    CHECK_NEED_EARLY_SHUFFLE_WITH_DATA = 7, 
+    WRITE_BUCKETS = 8,     
     RESPONSE = 100
 };
 
@@ -77,7 +82,7 @@ size_t calculate_bucket_size(const bucket& bkt) {
     return size;
 }
 
-void serialize_block(const block& blk, uint8_t* buffer, size_t& offset) {
+void serialize_block( block& blk, uint8_t* buffer, size_t& offset) {
   
     SerializedBlockHeader* header = reinterpret_cast<SerializedBlockHeader*>(buffer + offset);
     header->leaf_id = blk.GetLeafid();
@@ -109,74 +114,78 @@ block deserialize_block(const uint8_t* data, size_t& offset) {
     return block(header->leaf_id, header->block_index, block_data);
 }
 
-std::vector<uint8_t> serialize_bucket(const bucket& bkt) {
-    const size_t FIXED_SIZE = 65536;  // 固定大小
-    
+std::vector<uint8_t> serialize_bucket( bucket& bkt) {
+   
     try {
-        // 分配固定大小的缓冲区
-        std::vector<uint8_t> result(FIXED_SIZE, 0);
-        
+    
+        // 先计算大小
+
+        size_t total_size = calculate_bucket_size(bkt);
+     
+        if (total_size == 0) {
+            std::cerr << "ERROR: Calculated size is 0" << std::endl;
+            return std::vector<uint8_t>();
+        }
+       
+        std::vector<uint8_t> result(total_size);
+      
         // 序列化 bucket header
-        SerializedBucketHeader* bucket_header = 
-            reinterpret_cast<SerializedBucketHeader*>(result.data());
+      
+        SerializedBucketHeader* bucket_header = reinterpret_cast<SerializedBucketHeader*>(result.data());
         bucket_header->Z = bkt.Z;
         bucket_header->S = bkt.S;
         bucket_header->count = bkt.count;
         bucket_header->num_blocks = static_cast<int32_t>(bkt.blocks.size());
-        
+       
         size_t offset = sizeof(SerializedBucketHeader);
-        
+       
         // 序列化 blocks
-        for (int i = 0; i < bkt.blocks.size() && offset < FIXED_SIZE; i++) {
+    
+        for (int i = 0; i < bkt.blocks.size(); i++) {
+          
             serialize_block(bkt.blocks[i], result.data(), offset);
+       
         }
         
         // 序列化 ptrs 和 valids
+   
         int num_slots = bkt.Z + bkt.S;
+ 
+        // 检查边界
+        if (offset + num_slots * 2 * sizeof(int32_t) > total_size) {
+            std::cerr << "ERROR: Not enough space for ptrs and valids" << std::endl;
+            return std::vector<uint8_t>();
+        }
         
         // 序列化 ptrs
-        for (int i = 0; i < num_slots && offset < FIXED_SIZE; i++) {
+        for (int i = 0; i < num_slots; i++) {
             *reinterpret_cast<int32_t*>(result.data() + offset) = bkt.ptrs[i];
             offset += sizeof(int32_t);
         }
         
         // 序列化 valids
-        for (int i = 0; i < num_slots && offset < FIXED_SIZE; i++) {
+        for (int i = 0; i < num_slots; i++) {
             *reinterpret_cast<int32_t*>(result.data() + offset) = bkt.valids[i];
             offset += sizeof(int32_t);
         }
-        
-        // 填充剩余空间为0（可选）
-        // if (offset < FIXED_SIZE) {
-        //     memset(result.data() + offset, 0, FIXED_SIZE - offset);
-        // }
-        
+ 
         return result;
         
     } catch (const std::exception& e) {
-        std::cerr << "serialize_bucket failed: " << e.what() << std::endl;
-        return std::vector<uint8_t>(FIXED_SIZE, 0);  // 返回固定大小的空数据
+        std::cerr << "serialize_bucket failed with exception: " << e.what() << std::endl;
+        return std::vector<uint8_t>();
     }
 }
 
 bucket deserialize_bucket(const uint8_t* data, size_t size) {
-    const size_t FIXED_SIZE = 65536;  // 固定大小
-    
-    // 验证数据大小
-    if (size < FIXED_SIZE) {
-        std::cerr << "WARNING: Data size " << size << " < " << FIXED_SIZE 
-                  << ", using padded data" << std::endl;
-        // 可以在这里创建一个填充数据的副本
-    }
-    
+ 
     if (size < sizeof(SerializedBucketHeader)) {
-        std::cerr << "ERROR: Data too small for header" << std::endl;
+        std::cerr << "  ERROR: Data too small for header" << std::endl;
         throw std::runtime_error("Invalid bucket data: too small");
     }
     
-    const SerializedBucketHeader* bucket_header = 
-        reinterpret_cast<const SerializedBucketHeader*>(data);
-    
+    const SerializedBucketHeader* bucket_header = reinterpret_cast<const SerializedBucketHeader*>(data);
+  
     // 创建空的bucket
     bucket result(0, 0);
     result.Z = bucket_header->Z;
@@ -184,30 +193,39 @@ bucket deserialize_bucket(const uint8_t* data, size_t size) {
     result.count = bucket_header->count;
     
     size_t offset = sizeof(SerializedBucketHeader);
-    
-    // 反序列化 blocks（使用实际块数，而不是header中的num_blocks）
-    int num_blocks = std::min(bucket_header->num_blocks, 11);  // 假设最大11个块
-    for (int i = 0; i < num_blocks && offset < size; i++) {
+ 
+    // 反序列化 blocks
+  
+    for (int i = 0; i < bucket_header->num_blocks && offset < size; i++) {
         result.blocks.push_back(deserialize_block(data, offset));
     }
-    
-    // 反序列化 ptrs 和 valids
+ 
+    //从序列化数据中恢复ptrs和valids
     int num_slots = result.Z + result.S;
     result.ptrs.resize(num_slots, -1);
     result.valids.resize(num_slots, 0);
     
-    // 反序列化 ptrs
-    for (int i = 0; i < num_slots && offset < size; i++) {
-        result.ptrs[i] = *reinterpret_cast<const int32_t*>(data + offset);
-        offset += sizeof(int32_t);
+    // 检查是否有足够的空间来读取ptrs和valids
+    if (offset + num_slots * 2 * sizeof(int32_t) <= size) {
+     
+        // 反序列化 ptrs
+        for (int i = 0; i < num_slots; i++) {
+            int32_t ptr = *reinterpret_cast<const int32_t*>(data + offset);
+            result.ptrs[i] = ptr;
+            offset += sizeof(int32_t);
+        }
+        
+        // 反序列化 valids
+        for (int i = 0; i < num_slots; i++) {
+            int32_t valid = *reinterpret_cast<const int32_t*>(data + offset);
+            result.valids[i] = valid;
+            offset += sizeof(int32_t);
+        }
+   
+    } else {
+        std::cout << "  WARNING: No ptrs and valids data in serialized bucket" << std::endl;
     }
-    
-    // 反序列化 valids
-    for (int i = 0; i < num_slots && offset < size; i++) {
-        result.valids[i] = *reinterpret_cast<const int32_t*>(data + offset);
-        offset += sizeof(int32_t);
-    }
-    
+   
     return result;
 }
 
@@ -219,47 +237,62 @@ std::unique_ptr<ServerStorage> g_storage;
 std::vector<uint8_t> handleReadBucket(const uint8_t* request_data, uint32_t data_len) {
     if (data_len < 4) {
         std::cout << "Error: READ_BUCKET request data too short" << std::endl;
-        // 返回固定大小的数据
-        return std::vector<uint8_t>(FIXED_BUCKET_SIZE, 0);
+        // 返回空的65536字节数据
+        return std::vector<uint8_t>(65536, 0);
     }
     
+    // 解析桶位置
     int32_t position = *reinterpret_cast<const int32_t*>(request_data);
   
     try {
+        // 调用 ServerStorage 读取桶
         bucket bkt = g_storage->GetBucket(position);
+   
+        // 使用真正的序列化
         std::vector<uint8_t> serialized = serialize_bucket(bkt);
-        
-        // 确保返回固定大小
-        if (serialized.size() != FIXED_BUCKET_SIZE) {
-            serialized.resize(FIXED_BUCKET_SIZE, 0);
-        }
-        
+   
         return serialized;
+        
     } catch (const std::exception& e) {
         std::cerr << "Failed to read bucket: " << e.what() << std::endl;
-        return std::vector<uint8_t>(FIXED_BUCKET_SIZE, 0);
+        // 返回空的65536字节数据
+        return std::vector<uint8_t>(65536, 0);
     }
 }
 
+
+// 处理 WRITE_BUCKET 请求
 bool handleWriteBucket(const uint8_t* request_data, uint32_t data_len) {
     if (!g_storage) {
         std::cout << "Error: ServerStorage not initialized" << std::endl;
         return false;
     }
     
-    const size_t EXPECTED_SIZE = sizeof(int32_t) + FIXED_BUCKET_SIZE;
-    if (data_len < EXPECTED_SIZE) {
+    if (data_len < 4) {
         std::cout << "Error: WRITE_BUCKET request data too short" << std::endl;
         return false;
     }
     
+    // 解析桶位置
     int32_t position = *reinterpret_cast<const int32_t*>(request_data);
    
     try {
-        const uint8_t* bucket_data = request_data + 4;
-        bucket bkt_to_write = deserialize_bucket(bucket_data, FIXED_BUCKET_SIZE);
-        g_storage->SetBucket(position, bkt_to_write);
-        return true;
+        // 反序列化bucket数据（从第5字节开始）
+        if (data_len >= 4 + sizeof(SerializedBucketHeader)) {
+            const uint8_t* bucket_data = request_data + 4;
+            uint32_t bucket_data_len = data_len - 4;
+            
+            bucket bkt_to_write = deserialize_bucket(bucket_data, bucket_data_len);
+          
+            // 执行写入
+            g_storage->SetBucket(position, bkt_to_write);
+          
+            return true;
+        } else {
+            std::cout << "Error: Incomplete bucket data" << std::endl;
+            return false;
+        }
+        
     } catch (const std::exception& e) {
         std::cerr << "Write bucket failed: " << e.what() << std::endl;
         return false;
@@ -333,14 +366,15 @@ std::vector<uint8_t> handleReadPath(const uint8_t* request_data, uint32_t data_l
         if (interestblock.GetBlockindex() != -1) {
             const auto& data = interestblock.GetData();
             if (!data.empty()) {
-                // 检查数据大小
-                if (data.size() > 4095) {  // 减去1字节的is_dummy标志
-                    std::cerr << "Warning: Block data too large: " << data.size() 
-                              << " bytes, truncated" << std::endl;
-                    response.insert(response.end(), data.begin(), data.begin() + 4095);
-                } else {
-                    response.insert(response.end(), data.begin(), data.end());
-                }
+                // // 检查数据大小
+                // if (data.size() > 4095) {  // 减去1字节的is_dummy标志
+                //     std::cerr << "Warning: Block data too large: " << data.size() 
+                //               << " bytes, truncated" << std::endl;
+                //     response.insert(response.end(), data.begin(), data.begin() + 4095);
+                // } else {
+                //     response.insert(response.end(), data.begin(), data.end());
+                // }
+                response.insert(response.end(), data.begin(), data.end());
             }
         }
 
@@ -349,6 +383,273 @@ std::vector<uint8_t> handleReadPath(const uint8_t* request_data, uint32_t data_l
     } catch (const std::exception& e) {
         std::cerr << "Read path failed: " << e.what() << std::endl;
         return {};
+    }
+}
+
+
+// 处理 READ_PATH_FULL 请求
+std::vector<uint8_t> handleReadPathFull(const uint8_t* request_data, uint32_t data_len) {
+    if (!g_storage) {
+        std::cout << "Error: ServerStorage not initialized" << std::endl;
+        return {};
+    }
+    
+    if (data_len < 4) {
+        std::cout << "Error: READ_PATH_FULL request data too short" << std::endl;
+        return {};
+    }
+    
+    // 解析 leaf_id
+    int32_t leaf_id = *reinterpret_cast<const int32_t*>(request_data);
+    
+    try {
+        std::vector<uint8_t> response_data;
+        
+        // 遍历路径上的所有层级
+        for (int i = 0; i <= OramL; i++) {
+            int position = (1 << i) - 1 + (leaf_id >> (OramL - i));
+            
+            if (position < 0 || position >= capacity) {
+                std::cout << "Warning: Invalid bucket position: " << position 
+                         << " (leaf_id=" << leaf_id << ", level=" << i << ")" << std::endl;
+                continue;
+            }
+            
+            // 读取bucket并序列化
+            bucket& bkt = g_storage->GetBucket(position);
+            std::vector<uint8_t> serialized_bkt = serialize_bucket(bkt);
+            
+            if (!serialized_bkt.empty()) {
+                // 添加位置信息（4字节）
+                uint32_t pos = static_cast<uint32_t>(position);
+                response_data.insert(response_data.end(), 
+                                   reinterpret_cast<uint8_t*>(&pos), 
+                                   reinterpret_cast<uint8_t*>(&pos) + sizeof(uint32_t));
+                
+                // 添加bucket大小信息（4字节）
+                uint32_t bkt_size = static_cast<uint32_t>(serialized_bkt.size());
+                response_data.insert(response_data.end(),
+                                   reinterpret_cast<uint8_t*>(&bkt_size),
+                                   reinterpret_cast<uint8_t*>(&bkt_size) + sizeof(uint32_t));
+                
+                // 添加bucket数据
+                response_data.insert(response_data.end(),
+                                   serialized_bkt.begin(),
+                                   serialized_bkt.end());
+            }
+        }
+        
+        return response_data;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Read path full failed: " << e.what() << std::endl;
+        return {};
+    }
+}
+
+// 处理 WRITE_PATH_FULL 请求
+bool handleWritePathFull(const uint8_t* request_data, uint32_t data_len) {
+    if (!g_storage) {
+        std::cout << "Error: ServerStorage not initialized" << std::endl;
+        return false;
+    }
+    
+    size_t offset = 0;
+    
+    try {
+        // 解析并写入每个bucket
+        while (offset < data_len) {
+            if (offset + 8 > data_len) {
+                std::cout << "Error: Incomplete bucket header in WRITE_PATH_FULL" << std::endl;
+                return false;
+            }
+            
+            // 读取位置信息
+            int32_t position = *reinterpret_cast<const int32_t*>(request_data + offset);
+            offset += sizeof(int32_t);
+            
+            // 读取bucket大小
+            uint32_t bucket_size = *reinterpret_cast<const uint32_t*>(request_data + offset);
+            offset += sizeof(uint32_t);
+            
+            // 检查是否有足够的数据
+            if (offset + bucket_size > data_len) {
+                std::cout << "Error: Incomplete bucket data in WRITE_PATH_FULL" << std::endl;
+                return false;
+            }
+            
+            // 反序列化bucket
+            bucket bkt = deserialize_bucket(request_data + offset, bucket_size);
+            offset += bucket_size;
+            
+            // 写入bucket
+            g_storage->SetBucket(position, bkt);
+        }
+        
+        return true;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Write path full failed: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+
+// 处理 CHECK_NEED_EARLY_SHUFFLE 请求
+std::vector<uint8_t> handleCheckNeedEarlyShuffle(const uint8_t* request_data, uint32_t data_len) {
+    if (!g_storage) {
+        std::cout << "Error: ServerStorage not initialized" << std::endl;
+        return {};
+    }
+    
+    if (data_len < 4) {
+        std::cout << "Error: CHECK_NEED_EARLY_SHUFFLE request data too short" << std::endl;
+        return {};
+    }
+    
+    // 解析 leaf_id
+    int32_t leaf_id = *reinterpret_cast<const int32_t*>(request_data);
+    std::vector<uint8_t> response_data;
+    
+    try {
+        // 遍历路径上的所有层级
+        for (int i = 0; i <= OramL; i++) {
+            int position = (1 << i) - 1 + (leaf_id >> (OramL - i));
+            
+            if (position < 0 || position >= capacity) {
+                continue;
+            }
+            
+            // 读取bucket的count值（不需要读取整个bucket）
+            bucket& bkt = g_storage->GetBucket(position);
+            
+            // 检查是否需要reshuffle
+            if (bkt.count >= dummyBlockEachbkt) {
+                // 添加需要reshuffle的bucket位置
+                response_data.insert(response_data.end(),
+                                   reinterpret_cast<const uint8_t*>(&position),
+                                   reinterpret_cast<const uint8_t*>(&position) + sizeof(int32_t));
+                
+                // std::cout << "[Server] Bucket at position " << position 
+                //          << " needs earlyshuffle, count=" << bkt.count 
+                //          << " >= " << dummyBlockEachbkt << std::endl;
+            }
+        }
+        
+        return response_data;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Check need earlyshuffle failed: " << e.what() << std::endl;
+        return {};
+    }
+}
+
+
+std::vector<uint8_t> handleCheckNeedEarlyShuffleWithData(const uint8_t* request_data, uint32_t data_len) {
+    if (!g_storage) {
+        std::cout << "Error: ServerStorage not initialized" << std::endl;
+        return {};
+    }
+    
+    if (data_len < 4) {
+        std::cout << "Error: CHECK_NEED_EARLY_SHUFFLE_WITH_DATA request data too short" << std::endl;
+        return {};
+    }
+    
+    // 解析 leaf_id
+    int32_t leaf_id = *reinterpret_cast<const int32_t*>(request_data);
+    std::vector<uint8_t> response_data;
+    
+    try {
+        // 遍历路径上的所有层级
+        for (int i = 0; i <= OramL; i++) {
+            int position = (1 << i) - 1 + (leaf_id >> (OramL - i));
+            
+            if (position < 0 || position >= capacity) {
+                continue;
+            }
+            
+            // 读取bucket
+            bucket& bkt = g_storage->GetBucket(position);
+            
+            // 检查是否需要reshuffle
+            if (bkt.count >= dummyBlockEachbkt) {
+                // 序列化bucket
+                std::vector<uint8_t> serialized_bkt = serialize_bucket(bkt);
+                
+                if (!serialized_bkt.empty()) {
+                    // 添加位置信息（4字节）
+                    int32_t pos = static_cast<int32_t>(position);
+                    response_data.insert(response_data.end(),
+                                       reinterpret_cast<uint8_t*>(&pos),
+                                       reinterpret_cast<uint8_t*>(&pos) + sizeof(int32_t));
+                    
+                    // 添加bucket大小（4字节）
+                    uint32_t bkt_size = static_cast<uint32_t>(serialized_bkt.size());
+                    response_data.insert(response_data.end(),
+                                       reinterpret_cast<uint8_t*>(&bkt_size),
+                                       reinterpret_cast<uint8_t*>(&bkt_size) + sizeof(uint32_t));
+                    
+                    // 添加bucket数据
+                    response_data.insert(response_data.end(),
+                                       serialized_bkt.begin(),
+                                       serialized_bkt.end());
+                }
+            }
+        }
+        
+        return response_data;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Check need earlyshuffle with data failed: " << e.what() << std::endl;
+        return {};
+    }
+}
+
+// 处理 WRITE_BUCKETS 请求（批量写入多个bucket）
+bool handleWriteBuckets(const uint8_t* request_data, uint32_t data_len) {
+    if (!g_storage) {
+        std::cout << "Error: ServerStorage not initialized" << std::endl;
+        return false;
+    }
+    
+    size_t offset = 0;
+    
+    try {
+        // 解析每个bucket并写入
+        while (offset < data_len) {
+            if (offset + 8 > data_len) {
+                std::cout << "Error: Incomplete bucket header in WRITE_BUCKETS" << std::endl;
+                return false;
+            }
+            
+            // 读取位置信息
+            int32_t position = *reinterpret_cast<const int32_t*>(request_data + offset);
+            offset += sizeof(int32_t);
+            
+            // 读取bucket大小
+            uint32_t bucket_size = *reinterpret_cast<const uint32_t*>(request_data + offset);
+            offset += sizeof(uint32_t);
+            
+            // 检查是否有足够的数据
+            if (offset + bucket_size > data_len) {
+                std::cout << "Error: Incomplete bucket data in WRITE_BUCKETS" << std::endl;
+                return false;
+            }
+            
+            // 反序列化bucket
+            bucket bkt = deserialize_bucket(request_data + offset, bucket_size);
+            offset += bucket_size;
+            
+            // 写入bucket
+            g_storage->SetBucket(position, bkt);
+        }
+        
+        return true;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Write buckets failed: " << e.what() << std::endl;
+        return false;
     }
 }
 
@@ -409,6 +710,24 @@ void handleClient(tcp::socket socket) {
                 case READ_PATH:
                     response_data = handleReadPath(request_data.data(), header.data_len);
                     success = !response_data.empty();
+                    break;
+                case READ_PATH_FULL:
+                    response_data = handleReadPathFull(request_data.data(), header.data_len);
+                    success = !response_data.empty();
+                    break;
+                case WRITE_PATH_FULL:
+                    success = handleWritePathFull(request_data.data(), header.data_len);
+                    break;
+                case CHECK_NEED_EARLY_SHUFFLE:
+                    response_data = handleCheckNeedEarlyShuffle(request_data.data(), header.data_len);
+                    success = true;
+                    break;
+                case CHECK_NEED_EARLY_SHUFFLE_WITH_DATA:
+                    response_data = handleCheckNeedEarlyShuffleWithData(request_data.data(), header.data_len);
+                    success = true;
+                    break;
+                case WRITE_BUCKETS:
+                    success = handleWriteBuckets(request_data.data(), header.data_len);
                     break;
             }
             auto t5 = std::chrono::high_resolution_clock::now();

@@ -73,8 +73,9 @@ struct TreeHeapEntry {
 // 得分高的项优先出队（大顶堆）。
 // ===============================================
 struct TreeHeapComparator {
-    bool operator()(const TreeHeapEntry& a, const TreeHeapEntry& b) {
-        return a.score < b.score; // 分数高者优先
+    bool operator()(const TreeHeapEntry& a,
+                    const TreeHeapEntry& b) const {
+        return a.score < b.score;
     }
 };
 
@@ -160,6 +161,8 @@ public:
      */
     void splitNode(int node_id);
 
+    int getChildPath(std::shared_ptr<Node> parent_node, int child_id) const;
+
     // ====================================================
     // 递归位置映射初始化
     // ====================================================
@@ -241,10 +244,12 @@ public:
      * @brief 处理叶节点：计算包含的文档的相关性并加入结果集
      */
     void processLeafNode(std::shared_ptr<Node> leaf_node,
-        const std::vector<std::string>& keywords,
-        const MBR& spatial_scope,
-        double alpha,
-        std::vector<TreeHeapEntry>& results) const;
+    const std::vector<std::string>& keywords,
+    const MBR& spatial_scope,
+    double alpha,
+    std::vector<TreeHeapEntry>& results,
+    int k,                    // 最大结果数
+    double threshold) const;
 
     void processInternalNodeWithPath(std::shared_ptr<Node> internal_node,
         int parent_path,
@@ -277,6 +282,7 @@ public:
      */
     IRTree(std::shared_ptr<StorageInterface> storage_impl,
         int dims = 2, int min_cap = 2, int max_cap = 4);
+
 
     // ====================================================
     // 文档插入接口

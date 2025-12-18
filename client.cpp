@@ -7,12 +7,14 @@
 #include <string>
 #include "RingoramStorage.h"
 #include "IRTree.h"
-#include"param.h"
+#include "param.h"
 
 int main(int argc, char* argv[]) {
-    std::string query_filename = "query.txt";
+    std::string query_filename = "data/query_dataset_1048576_3keywords.txt";
+
     bool show_details = true;
-    std::string data_file = "large_data.txt";
+    std::string data_file = "data/dataset_1048576.txt";
+    // std::string data_file = "large_data.txt";
     std::string server_ip = "127.0.0.1";
     int server_port = 12345;
     if (argc > 1) server_ip = argv[1];
@@ -39,8 +41,6 @@ int main(int argc, char* argv[]) {
         tree.optimizedBulkInsertFromFile(data_file);
         
         // 4. 执行查询
-
-        
         std::ifstream query_file(query_filename);
         if (!query_file.is_open()) {
             std::cerr << "Error: Cannot open query file " << std::endl;
@@ -48,44 +48,70 @@ int main(int argc, char* argv[]) {
         }
 
         std::vector<std::chrono::nanoseconds> query_times;
-        std::vector<double> query_bandwidths;  // 存储每个查询的带宽(KB)
-        std::vector<size_t> query_blocks;      // 存储每个查询的块数
+        std::vector<double> query_bandwidths;
+        std::vector<size_t> query_blocks;
         std::string line;
         int query_count = 0;
 
         while (std::getline(query_file, line)) {
             if (line.empty()) continue;
 
+            // 新解析逻辑：支持多个关键词
             std::istringstream iss(line);
-            std::string text;
+            std::vector<std::string> parts;
+            std::string token;
+            
+            // 读取所有tokens
+            while (iss >> token) {
+                parts.push_back(token);
+            }
+            
+            // 至少需要3个部分：至少1个关键词 + 2个坐标
+            if (parts.size() < 3) {
+                std::cerr << "Invalid query format: " << line << std::endl;
+                continue;
+            }
+            
+            // 最后两个是坐标
             double x, y;
+            try {
+                x = std::stod(parts[parts.size() - 2]);
+                y = std::stod(parts[parts.size() - 1]);
+            } catch (...) {
+                std::cerr << "Invalid coordinates in query: " << line << std::endl;
+                continue;
+            }
+            
+            // 前面所有部分都是关键词
+            std::string text;
+            for (size_t i = 0; i < parts.size() - 2; i++) {
+                if (i > 0) text += " ";
+                text += parts[i];
+            }
+            
+            query_count++;
+            
+            if (show_details) {
+                std::cout << "\nQuery #" << query_count << ": \"" << text 
+                          << "\" at (" << x << ", " << y << ")" << std::endl;
+            }
 
-            // 解析格式: 文本 经度 纬度
-            if (iss >> text >> x >> y) {
-                query_count++;
-                
-                if (show_details) {
-                    std::cout << "\nQuery #" << query_count << ": \"" << text 
-                              << "\" at (" << x << ", " << y << ")" << std::endl;
-                }
+            // 创建搜索范围
+            double epsilon = 1000;
+            MBR search_scope({ x - epsilon, y - epsilon }, 
+                             { x + epsilon, y + epsilon });
 
-                // 创建搜索范围
-                double epsilon = 0.01;
-                MBR search_scope({ x - epsilon, y - epsilon }, 
-                                 { x + epsilon, y + epsilon });
+            auto query_time = tree.getRunTime(text, search_scope, 1, show_details);
+            query_times.push_back(query_time);
 
-                auto query_time = tree.getRunTime(text, search_scope, 10, show_details);
-                query_times.push_back(query_time);
-
-                // 计算这个查询的带宽和块数
-                query_bandwidths.push_back(tree.search_blocks * blocksize / 1024);
-                query_blocks.push_back(tree.search_blocks);
-                
-                if (show_details) {
-                    std::cout << "Query completed in " 
-                              << std::chrono::duration<double>(query_time).count() 
-                              << " seconds" << std::endl;
-                }
+            // 计算这个查询的带宽和块数
+            query_bandwidths.push_back(tree.search_blocks * blocksize / 1024);
+            query_blocks.push_back(tree.search_blocks);
+            
+            if (show_details) {
+                std::cout << "Query completed in " 
+                          << std::chrono::duration<double>(query_time).count() 
+                          << " seconds" << std::endl;
             }
         }
 
@@ -94,20 +120,20 @@ int main(int argc, char* argv[]) {
         // 5. 性能统计
         if (!query_times.empty()) {
             std::chrono::nanoseconds total_time = std::chrono::nanoseconds::zero();
-            double total_bandwidth_kb = 0.0;
-            size_t total_blocks = 0;
+            // double total_bandwidth_kb = 0.0;
+            // size_t total_blocks = 0;
 
             for (size_t i = 0; i < query_times.size(); i++) {
                 total_time += query_times[i];
-                total_bandwidth_kb += query_bandwidths[i];
-                total_blocks += query_blocks[i];
+                // total_bandwidth_kb += query_bandwidths[i];
+                // total_blocks += query_blocks[i];
             }
 
             double total_seconds = double(total_time.count()) * std::chrono::nanoseconds::period::num /
                 std::chrono::nanoseconds::period::den;
             double avg_seconds = total_seconds / query_times.size();
-            double avg_bandwidth_kb = total_bandwidth_kb / query_times.size();
-            double avg_blocks = static_cast<double>(total_blocks) / query_times.size();
+            // double avg_bandwidth_kb = total_bandwidth_kb / query_times.size();
+            // double avg_blocks = static_cast<double>(total_blocks) / query_times.size();
 
             // 格式化输出
             std::cout << "\n" << std::string(50, '=') << std::endl;
@@ -120,21 +146,21 @@ int main(int argc, char* argv[]) {
                       << avg_seconds << " seconds" << std::endl;
 
             // 格式化带宽输出
-            std::cout << "Total bandwidth: " << std::fixed << std::setprecision(0) 
-                      << total_bandwidth_kb << " KB";
-            if (total_bandwidth_kb >= 1024) {
-                std::cout << " (" << std::fixed << std::setprecision(2) 
-                          << (total_bandwidth_kb / 1024) << " MB)";
-            }
-            std::cout << std::endl;
+            // std::cout << "Total bandwidth: " << std::fixed << std::setprecision(0) 
+            //           << total_bandwidth_kb << " KB";
+            // if (total_bandwidth_kb >= 1024) {
+            //     std::cout << " (" << std::fixed << std::setprecision(2) 
+            //               << (total_bandwidth_kb / 1024) << " MB)";
+            // }
+            // std::cout << std::endl;
 
-            std::cout << "Average bandwidth: " << std::fixed << std::setprecision(2) 
-                      << avg_bandwidth_kb << " KB per query" << std::endl;
+            // std::cout << "Average bandwidth: " << std::fixed << std::setprecision(2) 
+            //           << avg_bandwidth_kb << " KB per query" << std::endl;
 
-            // 格式化块数输出
-            std::cout << "Total blocks: " << total_blocks << " blocks" << std::endl;
-            std::cout << "Average blocks: " << std::fixed << std::setprecision(1) 
-                      << avg_blocks << " blocks per query" << std::endl;
+            // // 格式化块数输出
+            // std::cout << "Total blocks: " << total_blocks << " blocks" << std::endl;
+            // std::cout << "Average blocks: " << std::fixed << std::setprecision(1) 
+            //           << avg_blocks << " blocks per query" << std::endl;
             
             // QPS（每秒查询数）
             double qps = query_times.size() / total_seconds;

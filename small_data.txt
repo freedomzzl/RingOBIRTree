@@ -1,14 +1,14 @@
-traditional pizza restaurant in back bay Boston|-70.9546|42.3663|0
-best bbq restaurant in downtown Boston|-71.1994|42.3575|1
-modern bbq restaurant in brookline Boston|-71.0326|42.3733|2
+traditional pizza restaurant in back bay Boston best bbq restaurant in downtown Boston|-70.9546|42.3663|0
+best bbq restaurant in downtown Boston modern bbq restaurant in brookline Boston|-71.1994|42.3575|1
+modern bbq restaurant in brookline delicious pizza restaurant in south end Boston|-71.0326|42.3733|2
 delicious pizza restaurant in south end Boston|-71.1325|42.3085|3
 fresh burger restaurant in south end Boston|-71.0009|42.3896|4
 delicious sushi restaurant in north end Boston|-71.1766|42.3856|5
-best curry restaurant in brookline Boston|-70.987|42.3175|6
+best curry restaurant in brookline Boston delicious sushi restaurant in back bay Boston|-70.987|42.3175|6
 delicious sushi restaurant in back bay Boston|-71.1223|42.3383|7
 amazing tacos restaurant in cambridge Boston|-71.0797|42.3525|8
 fresh burger restaurant in north end Boston|-71.0445|42.3834|9
-fresh pizza restaurant in back bay Boston|-71.0844|42.343|10
+fresh pizza restaurant in back bay Boston delicious bbq restaurant in north end Boston|-71.0844|42.343|10
 delicious bbq restaurant in north end Boston|-71.0123|42.3469|11
 authentic ramen restaurant in downtown Boston|-71.1637|42.3011|12
 great bbq restaurant in allston Boston|-70.9925|42.3478|13
@@ -81,7 +81,7 @@ authentic curry restaurant in cambridge Boston|-70.9794|42.3018|79
 authentic ramen restaurant in cambridge Boston|-71.1657|42.3499|80
 modern burger restaurant in brookline Boston|-71.1005|42.3894|81
 best curry restaurant in north end Boston|-71.1445|42.383|82
-authentic curry restaurant in brookline Boston|-71.0461|42.3504|83
+authentic curry restaurant in brookline Boston authentic curry restaurant in brookline Boston|-71.0461|42.3504|83
 modern pasta restaurant in south end Boston|-70.9741|42.3553|84
 best burger restaurant in south end Boston|-71.1839|42.3205|85
 delicious curry restaurant in brookline Boston|-71.0408|42.3054|86
