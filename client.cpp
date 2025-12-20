@@ -10,15 +10,16 @@
 #include "param.h"
 
 int main(int argc, char* argv[]) {
-    std::string query_filename = "data/query_dataset_1048576_3keywords.txt";
+    std::string query_filename = "data/query_dataset_65536_5keywords.txt";
 
     bool show_details = true;
-    std::string data_file = "data/dataset_1048576.txt";
+    std::string data_file = "data/dataset_65536.txt";
     // std::string data_file = "large_data.txt";
     std::string server_ip = "127.0.0.1";
     int server_port = 12345;
     if (argc > 1) server_ip = argv[1];
     if (argc > 2) server_port = std::stoi(argv[2]);
+    int k=1;
   
     std::cout << "=== IR-Tree Query Test ===" << std::endl;
     std::cout << "Block size: " << blocksize << " bytes" << std::endl;
@@ -101,7 +102,7 @@ int main(int argc, char* argv[]) {
             MBR search_scope({ x - epsilon, y - epsilon }, 
                              { x + epsilon, y + epsilon });
 
-            auto query_time = tree.getRunTime(text, search_scope, 1, show_details);
+            auto query_time = tree.getRunTime(text, search_scope, k, show_details);
             query_times.push_back(query_time);
 
             // 计算这个查询的带宽和块数
