@@ -10,11 +10,10 @@
 #include "param.h"
 
 int main(int argc, char* argv[]) {
-    std::string query_filename = "data/query_dataset_65536_5keywords.txt";
+    std::string query_filename = "query.txt";
 
     bool show_details = true;
-    std::string data_file = "data/dataset_65536.txt";
-    // std::string data_file = "large_data.txt";
+    std::string data_file = "large_data.txt";
     std::string server_ip = "127.0.0.1";
     int server_port = 12345;
     if (argc > 1) server_ip = argv[1];
