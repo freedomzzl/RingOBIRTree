@@ -1021,7 +1021,6 @@ std::vector<TreeHeapEntry> IRTree::search(const std::vector<std::string>& keywor
     int k,
     double alpha) {
 
-    nodes_visited=0;
     roundtrip=0;
     bandwidth=0;
     std::vector<TreeHeapEntry> results;
@@ -1599,7 +1598,6 @@ std::chrono::nanoseconds IRTree::getRunTime(const std::string& query_keywords, c
 
         std::cout << "RESULTS: " << results.size() << " documents found" << std::endl;
         std::cout << "Time: " << duration.count() / 1000000.0 << " ms" << std::endl;
-        std::cout << "nodes visited: " << nodes_visited << std::endl;
         std::cout << "roundtrip: " << roundtrip << std::endl;
         std::cout << "bandwidth: " << bandwidth*4 << std::endl;
        

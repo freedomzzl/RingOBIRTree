@@ -46,8 +46,6 @@ int main(int argc, char* argv[]) {
         }
 
         std::vector<std::chrono::nanoseconds> query_times;
-        std::vector<double> query_bandwidths;
-        std::vector<int> access_num_nodes;
         std::vector<int> num_round;
         std::vector<int> num_blocks;
         std::vector<size_t> query_blocks;
@@ -106,8 +104,6 @@ int main(int argc, char* argv[]) {
             query_times.push_back(query_time);
 
             // 计算这个查询的带宽和块数
-           
-            access_num_nodes.push_back(nodes_visited);
             num_round.push_back(roundtrip);  
             num_blocks.push_back(bandwidth);          
             if (show_details) {
@@ -122,35 +118,29 @@ int main(int argc, char* argv[]) {
         // 5. 性能统计
         if (!query_times.empty()) {
             std::chrono::nanoseconds total_time = std::chrono::nanoseconds::zero();
-          
-            int total_nodes=0;
+        
             int total_round=0;
             int total_blocks=0;
 
             for (size_t i = 0; i < query_times.size(); i++) {
                 total_time += query_times[i];
-                total_nodes+=access_num_nodes[i];
                 total_round+=num_round[i];
                 total_blocks+=num_blocks[i];
-              
             }
 
             double total_seconds = double(total_time.count()) * std::chrono::nanoseconds::period::num /
                 std::chrono::nanoseconds::period::den;
             double avg_seconds = total_seconds / query_times.size();
-            double avg_nodes=total_nodes/query_times.size();
-            double avg_round=total_round/query_times.size();
-            double avg_bandwidth=(total_blocks*4)/query_times.size();
+            double avg_round=static_cast<double>(total_round)/query_times.size();
+            double avg_bandwidth=(static_cast<double>(total_blocks)*4)/query_times.size();
            
             // 格式化输出
             std::cout << "\n" << std::string(50, '=') << std::endl;
             std::cout << "PERFORMANCE SUMMARY" << std::endl;
             std::cout << std::string(50, '=') << std::endl;
-
+    
             std::cout << "Average time: " << std::fixed << std::setprecision(3) 
                       << avg_seconds << " seconds" << std::endl;
-            std::cout <<"Average nodes accessed: "<< std::fixed << std::setprecision(1)
-                      <<avg_nodes<<std::endl;
             std::cout <<"Average roundtrip: "<< std::fixed << std::setprecision(0)
                       <<avg_round<<std::endl;
             std::cout <<"Average bandwidth: "<< std::fixed << std::setprecision(2)

@@ -21,8 +21,6 @@ std::string queryname = "data/query_dataset_1024_3keywords.txt";
 int k=1;
 int nodes_load=2;  ///<  可根据k的大小调整
 
-int nodes_visited = 0;
-
 int roundtrip=0;
 
 int bandwidth=0;

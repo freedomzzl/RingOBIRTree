@@ -47,8 +47,6 @@ extern std::string queryname;
 
 extern int nodes_load;
 
-extern int nodes_visited;
-
 extern int roundtrip;
 extern int bandwidth;
 

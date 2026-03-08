@@ -661,7 +661,6 @@ block ringoram::ReadPath(int leafid, int blockindex)
             return dummyBlock;
         }
 
-        nodes_visited++;
         roundtrip+=2;
         bandwidth=bandwidth+OramL;
 
