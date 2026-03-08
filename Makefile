@@ -1,7 +1,7 @@
 CXX = g++
 CXXFLAGS = -O3  -funroll-loops -flto -pthread -std=c++14
 LDFLAGS = -flto
-LIBS = -lcryptopp -lpthread -lm
+LIBS = /usr/local/lib/libcryptopp.a -lpthread -lm
 
 # 客户端源码
 CLIENT_CPP = client.cpp ringoram.cpp block.cpp bucket.cpp \

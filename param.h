@@ -3,6 +3,7 @@
 
 #include"block.h"
 #include<vector>
+#include <string>
 
 
 /*
@@ -16,6 +17,7 @@
 extern int totalnumRealblock;
 
 extern int OramL;
+extern int cacheLevel;
 
 extern int numLeaves;
 
@@ -38,8 +40,18 @@ extern block dummyBlock;
 //Ã¿¸öÍ°µÄcapacity
 extern int maxblockEachbkt;
 
-extern int cacheLevel;
+extern std::string dataname;
+extern std::string queryname;
 
-extern const size_t FIXED_BUCKET_SIZE;
+
+
+extern int nodes_load;
+
+extern int nodes_visited;
+
+extern int roundtrip;
+extern int bandwidth;
+
+extern int k;
 
 #endif

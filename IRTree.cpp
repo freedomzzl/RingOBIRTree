@@ -143,7 +143,7 @@ double IRTree::computeNodeRelevance(std::shared_ptr<Node> node,
         // 获取节点中该词的文档频率
         int node_df = node->getDocumentFrequency(keyword);
         
-        // 改进：考虑节点内文档频率的影响
+        // 考虑节点内文档频率的影响
         // 如果节点中只有少量文档包含该词，降低权重
         double node_df_factor = (node_df > 0) ? 
             std::min(1.0, log(1.0 + node_df) / log(2.0)) : 0.0;
@@ -156,7 +156,7 @@ double IRTree::computeNodeRelevance(std::shared_ptr<Node> node,
 
     // 归一化文本相关性上界
     if (matched_keywords > 0) {
-        // 更保守的归一化：除以关键词数量和最大TF的平方根
+        
         text_upper_bound = text_upper_bound / (keywords.size() * sqrt(10.0));
         text_upper_bound = std::min(1.0, text_upper_bound);
     } else {
@@ -420,72 +420,44 @@ void IRTree::processInternalNodeWithPath(std::shared_ptr<Node> internal_node,
             return a.estimated_relevance > b.estimated_relevance;
         });
 
-    // 第二轮：计算精确相关性并加入队列
-    for (const auto& child_info : child_infos) {
-        // 重新加载子节点（因为可能被修改）
-        auto child_node = accessNodeByPath(child_info.child_path);
+    // ============ 按估计分数排序（高的在前） ============
+    std::sort(child_infos.begin(), child_infos.end(),
+        [](const ChildInfo& a, const ChildInfo& b) {
+            return a.estimated_relevance > b.estimated_relevance;
+        });
+
+    // ============ 只加载前几个最有希望的节点 ============
+    const int MAX_NODES_TO_LOAD = nodes_load;  
+    
+    int loaded_count = 0;
+    for (const auto& candidate : child_infos) {
+        // 如果已经加载够了，停止
+        if (loaded_count >= MAX_NODES_TO_LOAD) {
+            break;
+        }
+        
+        // 分数太低的也跳过（即使还在前3名内）
+        if (candidate.estimated_relevance < 0.5) {  // 阈值可以调整
+            continue;
+        }
+
+        // 加载子节点
+        std::shared_ptr<Node> child_node;
+        child_node = accessNodeByPath(candidate.child_path);
+        
         if (!child_node) continue;
 
-        // 计算更精确的相关性
+        // 计算精确相关性
         double relevance = computeNodeRelevance(child_node, keywords, spatial_scope, alpha);
         
         if (relevance > 0) {
-            queue.push(TreeHeapEntry(child_node, child_info.child_path, relevance));
+            queue.push(TreeHeapEntry(child_node, candidate.child_path, relevance));
+            loaded_count++;  // 成功加载并加入队列才计数
         }
     }
 }
 
-// // 使用路径处理内部节点（新方法）
-// void IRTree::processInternalNodeWithPath(std::shared_ptr<Node> internal_node,
-//     int parent_path,
-//     const std::vector<std::string>& keywords,
-//     const MBR& spatial_scope,
-//     double alpha,
-//     std::priority_queue<TreeHeapEntry, std::vector<TreeHeapEntry>, TreeHeapComparator>& queue) {
 
-//     if (!internal_node || internal_node->getType() != Node::INTERNAL) {
-//         return;
-//     }
-
-//     // 从父节点中获取子节点的位置映射
-//     const auto& child_position_map = internal_node->getChildPositionMap();
-
-//     for (const auto& pos_pair : child_position_map) {
-//         int child_id = pos_pair.first;
-//         int child_path = pos_pair.second;
-
-//         // 使用路径访问子节点
-//         auto child_node = accessNodeByPath(child_path);
-//         if (!child_node) {
-//             std::cerr << "Failed to load child node " << child_id << " using path " << child_path << std::endl;
-//             continue;
-//         }
-
-//         // 检查空间重叠
-//         bool overlaps = child_node->getMBR().overlaps(spatial_scope);
-//         if (!overlaps) {
-//             continue;
-//         }
-
-//         // 检查文本相关性
-//         bool has_relevant_keywords = false;
-//         for (const auto& keyword : keywords) {
-//             if (child_node->getDocumentFrequency(keyword) > 0) {
-//                 has_relevant_keywords = true;
-//                 break;
-//             }
-//         }
-//         if (!has_relevant_keywords) {
-//             continue;
-//         }
-
-//         // 计算子节点相关性并加入优先队列（包含路径信息）
-//         double relevance = computeNodeRelevance(child_node, keywords, spatial_scope, alpha);
-//         if (relevance > 0) {
-//             queue.push(TreeHeapEntry(child_node, child_path, relevance));
-//         }
-//     }
-// }
 
 double IRTree::computeTextRelevance(const Document& doc, const std::vector<std::string>& query_terms) const
 {
@@ -1049,7 +1021,9 @@ std::vector<TreeHeapEntry> IRTree::search(const std::vector<std::string>& keywor
     int k,
     double alpha) {
 
-    search_blocks = 0;
+    nodes_visited=0;
+    roundtrip=0;
+    bandwidth=0;
     std::vector<TreeHeapEntry> results;
 
     if (!storage || keywords.empty() || k <= 0) {
@@ -1079,18 +1053,16 @@ std::vector<TreeHeapEntry> IRTree::search(const std::vector<std::string>& keywor
         queue.push(TreeHeapEntry(root_node, root_path, root_relevance));
     }
 
-    int nodes_visited = 0;
     int documents_checked = 0;
     double threshold = 0.0;
     int pruned_nodes = 0;
     int pruned_leaves = 0;
 
-    // ============ 关键修改：更灵活的循环条件 ============
+    // ============ 更灵活的循环条件 ============
     while (!queue.empty() && results.size() < k) {
         TreeHeapEntry current = queue.top();
         queue.pop();
-        nodes_visited++;
-
+       
         auto node = current.node; // 确保current总是节点
         
         // ============ 节点剪枝 ============
@@ -1147,8 +1119,7 @@ std::vector<TreeHeapEntry> IRTree::search(const std::vector<std::string>& keywor
                         return a.score > b.score; // 最小堆
                     });
                 threshold = results.front().score; // 最小分数
-                
-                // 注意：可以在此考虑提前终止
+             
                 // 如果队列中最高分 < threshold，可以提前结束
                 if (!queue.empty() && queue.top().score < threshold) {
                     break;
@@ -1162,20 +1133,12 @@ std::vector<TreeHeapEntry> IRTree::search(const std::vector<std::string>& keywor
         }
     }
 
-    search_blocks = nodes_visited * (OramL - cacheLevel);
-    
     // 最终排序（降序）
     std::sort(results.begin(), results.end(),
         [](const TreeHeapEntry& a, const TreeHeapEntry& b) {
             return a.score > b.score;
         });
 
-    // ============ 统计输出 ============
-    if (nodes_visited > 0) {
-        std::cout << "=== SEARCH STATISTICS ===" << std::endl;
-        std::cout << "  Total nodes visited: " << nodes_visited << std::endl;
-        std::cout << "  Final results: " << results.size() << std::endl;
-    }
 
     return results;
 }
@@ -1636,6 +1599,10 @@ std::chrono::nanoseconds IRTree::getRunTime(const std::string& query_keywords, c
 
         std::cout << "RESULTS: " << results.size() << " documents found" << std::endl;
         std::cout << "Time: " << duration.count() / 1000000.0 << " ms" << std::endl;
+        std::cout << "nodes visited: " << nodes_visited << std::endl;
+        std::cout << "roundtrip: " << roundtrip << std::endl;
+        std::cout << "bandwidth: " << bandwidth*4 << std::endl;
+       
 
 
         if (!results.empty()) {
@@ -1644,7 +1611,6 @@ std::chrono::nanoseconds IRTree::getRunTime(const std::string& query_keywords, c
                 if (result.isData()) {
                     auto doc = result.document;
                     std::cout << "  " << (i + 1) << ". Doc " << doc->getId()
-                        << " - Score: " << result.score
                         << " - '" << doc->getText() << "'" << std::endl;
                 }
             }
@@ -1657,4 +1623,3 @@ std::chrono::nanoseconds IRTree::getRunTime(const std::string& query_keywords, c
 
     return duration;
 }
-

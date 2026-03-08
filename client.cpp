@@ -10,18 +10,16 @@
 #include "param.h"
 
 int main(int argc, char* argv[]) {
-    std::string query_filename = "query.txt";
-
+    std::string query_filename = queryname;
     bool show_details = true;
-    std::string data_file = "large_data.txt";
+    std::string data_file = dataname;
     std::string server_ip = "127.0.0.1";
     int server_port = 12345;
     if (argc > 1) server_ip = argv[1];
     if (argc > 2) server_port = std::stoi(argv[2]);
-    int k=1;
+
   
     std::cout << "=== IR-Tree Query Test ===" << std::endl;
-    std::cout << "Block size: " << blocksize << " bytes" << std::endl;
     
     try {
         // 1. 初始化RingOramStorage
@@ -35,7 +33,7 @@ int main(int argc, char* argv[]) {
         
         // 2. 初始化IR-tree
         std::cout << "Initializing IR-tree..." << std::endl;
-        IRTree tree(storage, 2, 2, 5);
+        IRTree tree(storage, 2, 2, 12);
         
         // 3. 批量插入数据
         tree.optimizedBulkInsertFromFile(data_file);
@@ -49,6 +47,9 @@ int main(int argc, char* argv[]) {
 
         std::vector<std::chrono::nanoseconds> query_times;
         std::vector<double> query_bandwidths;
+        std::vector<int> access_num_nodes;
+        std::vector<int> num_round;
+        std::vector<int> num_blocks;
         std::vector<size_t> query_blocks;
         std::string line;
         int query_count = 0;
@@ -91,13 +92,13 @@ int main(int argc, char* argv[]) {
             
             query_count++;
             
-            if (show_details) {
-                std::cout << "\nQuery #" << query_count << ": \"" << text 
-                          << "\" at (" << x << ", " << y << ")" << std::endl;
-            }
+            // if (show_details) {
+            //     std::cout << "\nQuery #" << query_count << ": \"" << text 
+            //               << "\" at (" << x << ", " << y << ")" << std::endl;
+            // }
 
             // 创建搜索范围
-            double epsilon = 1000;
+            double epsilon = 150;
             MBR search_scope({ x - epsilon, y - epsilon }, 
                              { x + epsilon, y + epsilon });
 
@@ -105,9 +106,10 @@ int main(int argc, char* argv[]) {
             query_times.push_back(query_time);
 
             // 计算这个查询的带宽和块数
-            query_bandwidths.push_back(tree.search_blocks * blocksize / 1024);
-            query_blocks.push_back(tree.search_blocks);
-            
+           
+            access_num_nodes.push_back(nodes_visited);
+            num_round.push_back(roundtrip);  
+            num_blocks.push_back(bandwidth);          
             if (show_details) {
                 std::cout << "Query completed in " 
                           << std::chrono::duration<double>(query_time).count() 
@@ -120,48 +122,41 @@ int main(int argc, char* argv[]) {
         // 5. 性能统计
         if (!query_times.empty()) {
             std::chrono::nanoseconds total_time = std::chrono::nanoseconds::zero();
-            // double total_bandwidth_kb = 0.0;
-            // size_t total_blocks = 0;
+          
+            int total_nodes=0;
+            int total_round=0;
+            int total_blocks=0;
 
             for (size_t i = 0; i < query_times.size(); i++) {
                 total_time += query_times[i];
-                // total_bandwidth_kb += query_bandwidths[i];
-                // total_blocks += query_blocks[i];
+                total_nodes+=access_num_nodes[i];
+                total_round+=num_round[i];
+                total_blocks+=num_blocks[i];
+              
             }
 
             double total_seconds = double(total_time.count()) * std::chrono::nanoseconds::period::num /
                 std::chrono::nanoseconds::period::den;
             double avg_seconds = total_seconds / query_times.size();
-            // double avg_bandwidth_kb = total_bandwidth_kb / query_times.size();
-            // double avg_blocks = static_cast<double>(total_blocks) / query_times.size();
-
+            double avg_nodes=total_nodes/query_times.size();
+            double avg_round=total_round/query_times.size();
+            double avg_bandwidth=(total_blocks*4)/query_times.size();
+           
             // 格式化输出
             std::cout << "\n" << std::string(50, '=') << std::endl;
             std::cout << "PERFORMANCE SUMMARY" << std::endl;
             std::cout << std::string(50, '=') << std::endl;
-            std::cout << "Total queries: " << query_times.size() << std::endl;
-            std::cout << "Total time: " << std::fixed << std::setprecision(3) 
-                      << total_seconds << " seconds" << std::endl;
+
             std::cout << "Average time: " << std::fixed << std::setprecision(3) 
                       << avg_seconds << " seconds" << std::endl;
+            std::cout <<"Average nodes accessed: "<< std::fixed << std::setprecision(1)
+                      <<avg_nodes<<std::endl;
+            std::cout <<"Average roundtrip: "<< std::fixed << std::setprecision(0)
+                      <<avg_round<<std::endl;
+            std::cout <<"Average bandwidth: "<< std::fixed << std::setprecision(2)
+                      <<avg_bandwidth<<std::endl;
 
-            // 格式化带宽输出
-            // std::cout << "Total bandwidth: " << std::fixed << std::setprecision(0) 
-            //           << total_bandwidth_kb << " KB";
-            // if (total_bandwidth_kb >= 1024) {
-            //     std::cout << " (" << std::fixed << std::setprecision(2) 
-            //               << (total_bandwidth_kb / 1024) << " MB)";
-            // }
-            // std::cout << std::endl;
-
-            // std::cout << "Average bandwidth: " << std::fixed << std::setprecision(2) 
-            //           << avg_bandwidth_kb << " KB per query" << std::endl;
-
-            // // 格式化块数输出
-            // std::cout << "Total blocks: " << total_blocks << " blocks" << std::endl;
-            // std::cout << "Average blocks: " << std::fixed << std::setprecision(1) 
-            //           << avg_blocks << " blocks per query" << std::endl;
-            
+        
             // QPS（每秒查询数）
             double qps = query_times.size() / total_seconds;
             std::cout << "Queries per second (QPS): " << std::fixed << std::setprecision(2) 

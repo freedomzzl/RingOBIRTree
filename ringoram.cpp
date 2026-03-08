@@ -224,12 +224,7 @@ ringoram::ringoram(int n, const std::string& server_ip, int server_port, int cac
         delete[] positionmap;  // 清理资源
         throw;  // 重新抛出异常
     }
-    
-    cout << "[ORAM] Server: " << server_ip_ << ":" << server_port_ << endl;
-    cout << "[ORAM] Tree depth L = " << L << endl;
-    cout << "[ORAM] Number of buckets = " << num_bucket << endl;
-    cout << "[ORAM] Number of leaves = " << num_leaves << endl;
-    cout << "[ORAM] Cache levels = " << cache_levels << endl;
+ 
 }
 
 // 网络初始化
@@ -646,6 +641,7 @@ block ringoram::ReadPath(int leafid, int blockindex)
 {
 	try
     {
+
         // 1. 准备请求数据
         std::vector<uint8_t> request_data(8); // 4字节leaf_id + 4字节block_index
         *reinterpret_cast<int32_t*>(request_data.data()) = leafid;
@@ -664,6 +660,10 @@ block ringoram::ReadPath(int leafid, int blockindex)
         if (response_data.size() < 1) {
             return dummyBlock;
         }
+
+        nodes_visited++;
+        roundtrip+=2;
+        bandwidth=bandwidth+OramL;
 
         // 第一个字节：是否是dummy块
         bool is_dummy = response_data[0] == 1;
@@ -786,6 +786,8 @@ bool ringoram::WritePathFull(int leaf_id, const std::vector<bucket>& buckets_to_
 void ringoram::EvictPath() {
     int l = G % (1 << L);
     G += 1;
+    roundtrip+=2;
+    bandwidth=bandwidth+OramL*(realBlockEachbkt+dummyBlockEachbkt)*2;
     
     try {
         // 1. 一次性读取路径上的所有bucket
@@ -913,58 +915,7 @@ std::vector<int> ringoram::CheckNeedEarlyShuffle(int leaf_id) {
     }
 }
 
-// void ringoram::EarlyReshuffle(int leaf_id) {
-//     // 1. 先检查哪些bucket需要earlyshuffle
-//     std::vector<int> positions_to_shuffle = CheckNeedEarlyShuffle(leaf_id);
-    
-//     if (positions_to_shuffle.empty()) {
-//         // std::cout << "[EarlyReshuffle] No buckets need reshuffle for leaf " 
-//         //          << leaf_id << std::endl;
-//         return;
-//     }
-   
-//     // 2. 对每个需要reshuffle的bucket进行处理
-//     for (int position : positions_to_shuffle) {
-//         try {
-//             int level = GetlevelFromPos(position);
-            
-//             // 3. 读取bucket
-//             bucket bkt = Read_bucket(position);
-            
-//             // 再次确认需要reshuffle（防止竞态条件）
-//             if (bkt.count >= dummyBlockEachbkt) {
-                
-//                 // 4. 将有效块添加到stash（解密）
-//                 for (int j = 0; j < maxblockEachbkt; j++) {
-//                     if (bkt.ptrs[j] != -1 && bkt.valids[j] && !bkt.blocks[j].IsDummy()) {
-//                         block encrypted_block = bkt.blocks[j];
-                        
-//                         // 解密数据
-//                         vector<char> decrypted_data = decrypt_data(encrypted_block.GetData());
-                        
-//                         // 创建解密后的block对象
-//                         block decrypted_block(encrypted_block.GetLeafid(),
-//                                               encrypted_block.GetBlockindex(),
-//                                               decrypted_data);
-                        
-//                         // 添加到stash
-//                         stash.push_back(decrypted_block);
-//                     }
-//                 }
-                     
-//                 //  写回bucket
-//                 WriteBucket(position);
-                
-//             } 
-            
-//         } catch (const std::exception& e) {
-//             std::cerr << "  Error processing bucket at position " 
-//                      << position << ": " << e.what() << std::endl;
-//         }
-//     }
-    
-//     // std::cout << "[EarlyReshuffle] Completed for leaf " << leaf_id << std::endl;
-// }
+
 
 void ringoram::EarlyReshuffle(int leaf_id) {
     try {
@@ -986,6 +937,9 @@ void ringoram::EarlyReshuffle(int leaf_id) {
             // std::cout << "[EarlyReshuffle] No buckets need reshuffle" << std::endl;
             return;
         }
+
+        roundtrip+=1;
+        bandwidth=bandwidth+realBlockEachbkt+dummyBlockEachbkt;
         
         // 2. 解析获取到的bucket数据
         size_t offset = 0;
@@ -1162,39 +1116,43 @@ std::vector<char> ringoram::decrypt_data(const std::vector<char>& encrypted_data
 vector<char> ringoram::access(int blockindex, Operation op, vector<char> data)
 {
 	if (blockindex < 0 || blockindex >= N) {
-
 		return {};
 	}
 
 	int oldLeaf = positionmap[blockindex];
 	positionmap[blockindex] = get_random();
 
-	// 1. 读取路径获取目标块（加密状态）
-	block interestblock = ReadPath(oldLeaf, blockindex);
 	vector<char> blockdata;
+	bool found_in_stash = false;
 
-	// 2. 处理读取到的块
-	if (interestblock.GetBlockindex() == blockindex) {
-		// 从路径读取到的目标块，需要解密
-		if (!interestblock.IsDummy()) {
-			blockdata = decrypt_data(interestblock.GetData());
-		}
-		else {
-			blockdata = interestblock.GetData();
+	// 1. 先在 stash 中查找
+	for (auto it = stash.begin(); it != stash.end(); ++it) {
+		if (it->GetBlockindex() == blockindex) {
+			blockdata = it->GetData();   // stash中已经是明文
+			stash.erase(it);
+			found_in_stash = true;
+			break;
 		}
 	}
-	else {
-		// 3. 如果不在路径中，检查stash
-		for (auto it = stash.begin(); it != stash.end(); ++it) {
-			if (it->GetBlockindex() == blockindex) {
-				blockdata = it->GetData();   // stash中已经是明文
-				stash.erase(it);
-				break;
+
+	// 2. 如果 stash 中没有找到，再从路径中读取
+	if (!found_in_stash) {
+		// 读取路径获取目标块（加密状态）
+		block interestblock = ReadPath(oldLeaf, blockindex);
+
+		// 处理从路径读取到的块
+		if (interestblock.GetBlockindex() == blockindex) {
+			// 从路径读取到的目标块，需要解密
+			if (!interestblock.IsDummy()) {
+				blockdata = decrypt_data(interestblock.GetData());
+			}
+			else {
+				blockdata = interestblock.GetData();
 			}
 		}
 	}
 
-	// 4. 如果是WRITE操作，更新数据
+	// 3. 如果是WRITE操作，更新数据
 	if (op == WRITE) {
 		blockdata = data;
 	}
@@ -1202,11 +1160,14 @@ vector<char> ringoram::access(int blockindex, Operation op, vector<char> data)
 	// 明文放入stash
 	stash.emplace_back(positionmap[blockindex], blockindex, blockdata);
 
-	// 5. 路径管理和驱逐
+	// 4. 路径管理和驱逐
 	round = (round + 1) % EvictRound;
 	if (round == 0) EvictPath();
 
-	EarlyReshuffle(oldLeaf);
+	// 5. EarlyReshuffle 只在从服务器读取后执行
+	if (!found_in_stash) {
+		EarlyReshuffle(oldLeaf);
+	}
 
 	return blockdata;
 }
