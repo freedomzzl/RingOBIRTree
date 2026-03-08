@@ -15,7 +15,7 @@ int EvictRound = 10;
 block dummyBlock(-1, -1, {});
 int maxblockEachbkt = realBlockEachbkt + dummyBlockEachbkt;
 
-std::string dataname = "data/dataset_262144.txt";
+std::string dataname = "data/dataset_4096.txt";
 std::string queryname = "data/query_dataset_1024_3keywords.txt";
 
 int k=1;
