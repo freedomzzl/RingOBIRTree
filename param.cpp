@@ -15,11 +15,12 @@ int EvictRound = 10;
 block dummyBlock(-1, -1, {});
 int maxblockEachbkt = realBlockEachbkt + dummyBlockEachbkt;
 
-std::string dataname = "data/dataset_4096.txt";
+std::string dataname = "data/dataset_1048576.txt";
 std::string queryname = "data/query_dataset_1024_3keywords.txt";
 
-int k=1;
-int nodes_load=2;  ///<  可根据k的大小调整
+int k=20;
+int nodes_load=3;  ///<  可根据k的大小调整
+int g_threshold=0.8; ///< 可根据k和数据量调整
 
 int roundtrip=0;
 

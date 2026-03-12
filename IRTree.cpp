@@ -437,7 +437,7 @@ void IRTree::processInternalNodeWithPath(std::shared_ptr<Node> internal_node,
         }
         
         // 分数太低的也跳过（即使还在前3名内）
-        if (candidate.estimated_relevance < 0.5) {  // 阈值可以调整
+        if (candidate.estimated_relevance < g_threshold) {  // 阈值可以调整
             continue;
         }
 

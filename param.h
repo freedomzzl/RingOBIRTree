@@ -51,5 +51,6 @@ extern int roundtrip;
 extern int bandwidth;
 
 extern int k;
+extern int g_threshold;
 
 #endif
