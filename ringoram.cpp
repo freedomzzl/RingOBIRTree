@@ -99,8 +99,6 @@ bool sendRequest(uint32_t type, const uint8_t* request_data, size_t request_len,
     }
     
     try {
-        auto total_start = std::chrono::high_resolution_clock::now();
-        
         // 1. 准备请求头
         RequestHeader req_header;
         req_header.type = type;
@@ -108,66 +106,59 @@ bool sendRequest(uint32_t type, const uint8_t* request_data, size_t request_len,
         req_header.data_len = static_cast<uint32_t>(request_len);
         req_header.reserved = 0;
         
+        // === 统计发送的数据量 ===
+        size_t sent_bytes = sizeof(req_header) + request_len;
+        bandwidth += sent_bytes;  // 累加发送字节数
+        roundtrip++;  // 每次请求-响应算一个往返
+        
         // === TCP优化：设置QUICKACK ===
         int quickack = 1;
         setsockopt(g_socket->native_handle(), IPPROTO_TCP, TCP_QUICKACK, &quickack, sizeof(quickack));
         
-        // 2. 发送请求（一次性发送头和数据）
-        auto send_start = std::chrono::high_resolution_clock::now();
-        
+        // 2. 发送请求
         if (request_len == 0 || !request_data) {
-            // 只有请求头
             asio::write(*g_socket, asio::buffer(&req_header, sizeof(req_header)));
         } else {
-            // 合并发送头和数据
             std::vector<asio::const_buffer> buffers;
             buffers.push_back(asio::buffer(&req_header, sizeof(req_header)));
             buffers.push_back(asio::buffer(request_data, request_len));
             asio::write(*g_socket, buffers);
         }
-        auto send_end = std::chrono::high_resolution_clock::now();
         
         // 3. 接收响应头
-        auto recv_start = std::chrono::high_resolution_clock::now();
-        
-        // 接收前设置QUICKACK
         setsockopt(g_socket->native_handle(), IPPROTO_TCP, TCP_QUICKACK, &quickack, sizeof(quickack));
         ResponseHeader resp_header;
         asio::read(*g_socket, asio::buffer(&resp_header, sizeof(resp_header)));
         
+        // 统计接收的头数据
+        bandwidth += sizeof(resp_header);  // 累加接收字节数
+        
         // 检查响应是否匹配请求
         if (resp_header.request_id != req_header.request_id) {
-            error_msg = "Response ID mismatch: request=" + std::to_string(req_header.request_id)
-                      + ", response=" + std::to_string(resp_header.request_id);
+            error_msg = "Response ID mismatch";
             return false;
         }
         
         if (resp_header.type != RESPONSE) {
-            error_msg = "Invalid response type: " + std::to_string(resp_header.type);
+            error_msg = "Invalid response type";
             return false;
         }
         
         if (resp_header.result != 0) {
-            error_msg = "Server operation failed, error code: " + std::to_string(resp_header.result);
+            error_msg = "Server operation failed";
             return false;
         }
         
         // 4. 接收响应数据
         response_data.clear();
         if (resp_header.data_len > 0) {
-            // 接收前设置QUICKACK
             setsockopt(g_socket->native_handle(), IPPROTO_TCP, TCP_QUICKACK, &quickack, sizeof(quickack));
             response_data.resize(resp_header.data_len);
             asio::read(*g_socket, asio::buffer(response_data.data(), resp_header.data_len));
+            
+            // 统计接收的数据
+            bandwidth += resp_header.data_len;  // 累加接收数据字节数
         }
-        auto recv_end = std::chrono::high_resolution_clock::now();
-        auto total_end = recv_end;
-        
-        // 输出客户端视角的耗时
-        // std::cout << "[CLIENT] Type:" << type 
-        //           << " Send:" << duration_us(send_end, send_start)
-        //           << " Recv:" << duration_us(recv_end, recv_start)
-        //           << " Total:" << duration_us(total_end, total_start) << "us" << std::endl;
         
         return true;
     }
@@ -791,9 +782,7 @@ bool ringoram::WritePathFull(int leaf_id, const std::vector<bucket>& buckets_to_
 void ringoram::EvictPath() {
     int l = G % (1 << L);
     G += 1;
-    roundtrip+=2;
-    bandwidth=bandwidth+OramL*(realBlockEachbkt+dummyBlockEachbkt)*2;
-    
+
     try {
         // 1. 一次性读取路径上的所有bucket
         std::vector<bucket> path_buckets = ReadPathFull(l);
@@ -887,9 +876,7 @@ void ringoram::EarlyReshuffle(int l, const std::vector<std::pair<int, bucket>>& 
     if (buckets_to_process.empty()) {
         return;
     }
-    
-    roundtrip+=1;
-    bandwidth=bandwidth+realBlockEachbkt+dummyBlockEachbkt;
+  
     // 3. 处理传入的需要洗牌的buckets
     std::vector<std::pair<int, bucket>> buckets_to_write;
     

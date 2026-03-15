@@ -1598,8 +1598,10 @@ std::chrono::nanoseconds IRTree::getRunTime(const std::string& query_keywords, c
 
         std::cout << "RESULTS: " << results.size() << " documents found" << std::endl;
         std::cout << "Time: " << duration.count() / 1000000.0 << " ms" << std::endl;
-        std::cout << "roundtrip: " << roundtrip << std::endl;
-        std::cout << "bandwidth: " << bandwidth*4 << std::endl;
+        std::cout << "Roundtrip: " << roundtrip << std::endl;
+        double bandwidth_kb = static_cast<double>(bandwidth) / 1024.0;
+        std::cout << "Bandwidth: " << std::fixed << std::setprecision(2) 
+                  << bandwidth_kb << " KB" << std::endl;
        
 
 

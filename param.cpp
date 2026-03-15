@@ -3,6 +3,7 @@
 #include<cstring>
 #include<string>
 
+
 int totalnumRealblock = 2000000;
 int OramL = static_cast<int>(ceil(log2(totalnumRealblock)));
 int cacheLevel=2;
@@ -24,5 +25,5 @@ int g_threshold=0.8; ///< 可根据k和数据量调整
 
 int roundtrip=0;
 
-int bandwidth=0;
+int64_t bandwidth=0;
 

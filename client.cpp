@@ -46,9 +46,8 @@ int main(int argc, char* argv[]) {
         }
 
         std::vector<std::chrono::nanoseconds> query_times;
-        std::vector<int> num_round;
-        std::vector<int> num_blocks;
-        std::vector<size_t> query_blocks;
+        std::vector<int> roundtrip_records;           // 记录每次查询的roundtrip
+        std::vector<int64_t> bandwidth_records;       // 记录每次查询的带宽（字节）
         std::string line;
         int query_count = 0;
 
@@ -90,11 +89,6 @@ int main(int argc, char* argv[]) {
             
             query_count++;
             
-            // if (show_details) {
-            //     std::cout << "\nQuery #" << query_count << ": \"" << text 
-            //               << "\" at (" << x << ", " << y << ")" << std::endl;
-            // }
-
             // 创建搜索范围
             double epsilon = 150;
             MBR search_scope({ x - epsilon, y - epsilon }, 
@@ -103,14 +97,23 @@ int main(int argc, char* argv[]) {
             auto query_time = tree.getRunTime(text, search_scope, k, show_details);
             query_times.push_back(query_time);
 
-            // 计算这个查询的带宽和块数
-            num_round.push_back(roundtrip);  
-            num_blocks.push_back(bandwidth);          
-            if (show_details) {
-                std::cout << "Query completed in " 
-                          << std::chrono::duration<double>(query_time).count() 
-                          << " seconds" << std::endl;
-            }
+            // 记录这个查询的roundtrip和带宽
+            roundtrip_records.push_back(roundtrip);  
+            bandwidth_records.push_back(bandwidth);  
+                  
+            // if (show_details) {
+            //     std::cout << "Query completed in " 
+            //               << std::chrono::duration<double>(query_time).count() 
+            //               << " seconds" << std::endl;
+                
+            //     // 显示带宽信息
+            //     double bandwidth_kb = static_cast<double>(bandwidth) / 1024.0;
+            //     double bandwidth_mb = bandwidth_kb / 1024.0;
+            //     std::cout << "Roundtrip: " << roundtrip << std::endl;
+            //     std::cout << "Bandwidth: " << bandwidth << " bytes (" 
+            //               << std::fixed << std::setprecision(2) << bandwidth_kb << " KB, "
+            //               << bandwidth_mb << " MB)" << std::endl;
+            // }
         }
 
         query_file.close();
@@ -119,21 +122,24 @@ int main(int argc, char* argv[]) {
         if (!query_times.empty()) {
             std::chrono::nanoseconds total_time = std::chrono::nanoseconds::zero();
         
-            int total_round=0;
-            int total_blocks=0;
+            int total_roundtrip = 0;
+            int64_t total_bandwidth = 0;  
 
             for (size_t i = 0; i < query_times.size(); i++) {
                 total_time += query_times[i];
-                total_round+=num_round[i];
-                total_blocks+=num_blocks[i];
+                total_roundtrip += roundtrip_records[i];
+                total_bandwidth += bandwidth_records[i];
             }
 
             double total_seconds = double(total_time.count()) * std::chrono::nanoseconds::period::num /
                 std::chrono::nanoseconds::period::den;
             double avg_seconds = total_seconds / query_times.size();
-            double avg_round=static_cast<double>(total_round)/query_times.size();
-            double avg_bandwidth=(static_cast<double>(total_blocks)*4)/query_times.size();
-           
+            double avg_roundtrip = static_cast<double>(total_roundtrip) / query_times.size();
+            
+            
+            double avg_bandwidth_bytes = static_cast<double>(total_bandwidth) / query_times.size();
+            double avg_bandwidth_kb = avg_bandwidth_bytes / 1024.0;
+            
             // 格式化输出
             std::cout << "\n" << std::string(50, '=') << std::endl;
             std::cout << "PERFORMANCE SUMMARY" << std::endl;
@@ -141,12 +147,17 @@ int main(int argc, char* argv[]) {
     
             std::cout << "Average time: " << std::fixed << std::setprecision(3) 
                       << avg_seconds << " seconds" << std::endl;
-            std::cout <<"Average roundtrip: "<< std::fixed << std::setprecision(0)
-                      <<avg_round<<std::endl;
-            std::cout <<"Average bandwidth: "<< std::fixed << std::setprecision(2)
-                      <<avg_bandwidth<<std::endl;
-
-        
+            std::cout << "Average roundtrip: " << std::fixed << std::setprecision(1)
+                      << avg_roundtrip << std::endl;
+            
+            // 输出多种单位的带宽
+            std::cout << "Average bandwidth: " << std::fixed << std::setprecision(2)
+                      << avg_bandwidth_bytes << " bytes" << std::endl;
+            std::cout << "Average bandwidth: " << std::fixed << std::setprecision(2)
+                      << avg_bandwidth_kb << " KB" << std::endl;
+           
+            // 总带宽统计
+           
             // QPS（每秒查询数）
             double qps = query_times.size() / total_seconds;
             std::cout << "Queries per second (QPS): " << std::fixed << std::setprecision(2) 

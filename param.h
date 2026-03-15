@@ -3,6 +3,7 @@
 
 #include"block.h"
 #include<vector>
+#include <cstdint>
 #include <string>
 
 
@@ -48,7 +49,7 @@ extern std::string queryname;
 extern int nodes_load;
 
 extern int roundtrip;
-extern int bandwidth;
+extern int64_t bandwidth;
 
 extern int k;
 extern int g_threshold;
