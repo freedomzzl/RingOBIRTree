@@ -151,8 +151,7 @@ int main(int argc, char* argv[]) {
                       << avg_roundtrip << std::endl;
             
             // 输出多种单位的带宽
-            std::cout << "Average bandwidth: " << std::fixed << std::setprecision(2)
-                      << avg_bandwidth_bytes << " bytes" << std::endl;
+           
             std::cout << "Average bandwidth: " << std::fixed << std::setprecision(2)
                       << avg_bandwidth_kb << " KB" << std::endl;
            

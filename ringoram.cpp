@@ -214,7 +214,6 @@ ringoram::ringoram(int n, const std::string& server_ip, int server_port, int cac
     }
 }
 
-
 // 网络初始化
 void ringoram::initNetwork() {
 
@@ -346,61 +345,91 @@ block deserialize_block(const uint8_t* data, size_t& offset) {
     return block(header->leaf_id, header->block_index, block_data);
 }
 
-std::vector<uint8_t> serialize_bucket( bucket& bkt) {
-   
-    try {
-    
-        // 先计算大小
 
-        size_t total_size = calculate_bucket_size(bkt);
-     
+
+
+
+std::vector<uint8_t> serialize_bucket(bucket& bkt) {
+    try {
+        // 验证bucket数据
+        if (bkt.blocks.empty() || bkt.ptrs.empty() || bkt.valids.empty()) {
+            std::cerr << "ERROR: Bucket has empty data structures" << std::endl;
+            return std::vector<uint8_t>();
+        }
+        
+        // 计算总大小
+        size_t total_size = sizeof(SerializedBucketHeader);
+        
+        // 计算blocks大小
+        for (auto& blk : bkt.blocks) {
+            total_size += sizeof(SerializedBlockHeader) + blk.GetData().size();
+        }
+        
+        // 计算ptrs和valids大小
+        int num_slots = bkt.Z + bkt.S;
+        total_size += num_slots * 2 * sizeof(int32_t);
+        
         if (total_size == 0) {
             std::cerr << "ERROR: Calculated size is 0" << std::endl;
             return std::vector<uint8_t>();
         }
-       
-        std::vector<uint8_t> result(total_size);
-      
-        // 序列化 bucket header
-      
+        
+        std::vector<uint8_t> result(total_size, 0); // 初始化为0
+        
+        // 序列化bucket header
         SerializedBucketHeader* bucket_header = reinterpret_cast<SerializedBucketHeader*>(result.data());
         bucket_header->Z = bkt.Z;
         bucket_header->S = bkt.S;
         bucket_header->count = bkt.count;
         bucket_header->num_blocks = static_cast<int32_t>(bkt.blocks.size());
-       
+        
         size_t offset = sizeof(SerializedBucketHeader);
-       
-        // 序列化 blocks
-    
-        for (int i = 0; i < bkt.blocks.size(); i++) {
-          
-            serialize_block(bkt.blocks[i], result.data(), offset);
-       
+        
+        // 序列化blocks
+        for (auto& blk : bkt.blocks) {
+            if (offset + sizeof(SerializedBlockHeader) > total_size) {
+                std::cerr << "ERROR: Buffer overflow in block serialization" << std::endl;
+                return std::vector<uint8_t>();
+            }
+            
+            SerializedBlockHeader* block_header = reinterpret_cast<SerializedBlockHeader*>(result.data() + offset);
+            block_header->leaf_id = blk.GetLeafid();
+            block_header->block_index = blk.GetBlockindex();
+            
+            const auto& data = blk.GetData();
+            block_header->data_size = static_cast<int32_t>(data.size());
+            offset += sizeof(SerializedBlockHeader);
+            
+            if (!data.empty()) {
+                if (offset + data.size() > total_size) {
+                    std::cerr << "ERROR: Buffer overflow in block data" << std::endl;
+                    return std::vector<uint8_t>();
+                }
+                memcpy(result.data() + offset, data.data(), data.size());
+                offset += data.size();
+            }
         }
         
-        // 序列化 ptrs 和 valids
-   
-        int num_slots = bkt.Z + bkt.S;
- 
-        // 检查边界
-        if (offset + num_slots * 2 * sizeof(int32_t) > total_size) {
-            std::cerr << "ERROR: Not enough space for ptrs and valids" << std::endl;
-            return std::vector<uint8_t>();
-        }
-        
-        // 序列化 ptrs
+        // 序列化ptrs
         for (int i = 0; i < num_slots; i++) {
-            *reinterpret_cast<int32_t*>(result.data() + offset) = bkt.ptrs[i];
+            if (offset + sizeof(int32_t) > total_size) {
+                std::cerr << "ERROR: Buffer overflow in ptrs serialization" << std::endl;
+                return std::vector<uint8_t>();
+            }
+            *reinterpret_cast<int32_t*>(result.data() + offset) = (i < bkt.ptrs.size()) ? bkt.ptrs[i] : -1;
             offset += sizeof(int32_t);
         }
         
-        // 序列化 valids
+        // 序列化valids
         for (int i = 0; i < num_slots; i++) {
-            *reinterpret_cast<int32_t*>(result.data() + offset) = bkt.valids[i];
+            if (offset + sizeof(int32_t) > total_size) {
+                std::cerr << "ERROR: Buffer overflow in valids serialization" << std::endl;
+                return std::vector<uint8_t>();
+            }
+            *reinterpret_cast<int32_t*>(result.data() + offset) = (i < bkt.valids.size()) ? bkt.valids[i] : 0;
             offset += sizeof(int32_t);
         }
- 
+        
         return result;
         
     } catch (const std::exception& e) {
@@ -409,57 +438,105 @@ std::vector<uint8_t> serialize_bucket( bucket& bkt) {
     }
 }
 
+
+
+
+
 bucket deserialize_bucket(const uint8_t* data, size_t size) {
- 
     if (size < sizeof(SerializedBucketHeader)) {
-        // std::cerr << "  ERROR: Data too small for header" << std::endl;
+        std::cerr << "ERROR: Data too small for header. Size=" << size 
+                  << ", required=" << sizeof(SerializedBucketHeader) << std::endl;
         throw std::runtime_error("Invalid bucket data: too small");
     }
     
     const SerializedBucketHeader* bucket_header = reinterpret_cast<const SerializedBucketHeader*>(data);
-  
-    // 创建空的bucket
-    bucket result(0, 0);
-    result.Z = bucket_header->Z;
-    result.S = bucket_header->S;
+    
+    // 验证header中的值是否合理
+    if (bucket_header->Z != realBlockEachbkt || bucket_header->S != dummyBlockEachbkt) {
+        std::cerr << "WARNING: Bucket parameters mismatch. Expected Z=" << realBlockEachbkt 
+                  << ", S=" << dummyBlockEachbkt 
+                  << ", got Z=" << bucket_header->Z << ", S=" << bucket_header->S << std::endl;
+    }
+    
+    if (bucket_header->num_blocks < 0 || bucket_header->num_blocks > 100) { // 合理的上限
+        std::cerr << "ERROR: Invalid num_blocks: " << bucket_header->num_blocks << std::endl;
+        throw std::runtime_error("Invalid bucket data: invalid num_blocks");
+    }
+    
+    // 创建bucket
+    bucket result(bucket_header->Z, bucket_header->S);
     result.count = bucket_header->count;
     
     size_t offset = sizeof(SerializedBucketHeader);
- 
-    // 反序列化 blocks
-  
-    for (int i = 0; i < bucket_header->num_blocks && offset < size; i++) {
-        result.blocks.push_back(deserialize_block(data, offset));
-    }
- 
-    //从序列化数据中恢复ptrs和valids
     int num_slots = result.Z + result.S;
+    
+    // 反序列化blocks
+    result.blocks.clear();
+    for (int i = 0; i < bucket_header->num_blocks && offset < size; i++) {
+        if (offset + sizeof(SerializedBlockHeader) > size) {
+            std::cerr << "ERROR: Truncated block header at block " << i << std::endl;
+            throw std::runtime_error("Invalid bucket data: truncated block header");
+        }
+        
+        const SerializedBlockHeader* block_header = reinterpret_cast<const SerializedBlockHeader*>(data + offset);
+        offset += sizeof(SerializedBlockHeader);
+        
+        std::vector<char> block_data;
+        if (block_header->data_size > 0) {
+            if (offset + block_header->data_size > size) {
+                std::cerr << "ERROR: Truncated block data at block " << i << std::endl;
+                throw std::runtime_error("Invalid bucket data: truncated block data");
+            }
+            block_data.resize(block_header->data_size);
+            memcpy(block_data.data(), data + offset, block_header->data_size);
+            offset += block_header->data_size;
+        }
+        
+        result.blocks.emplace_back(block_header->leaf_id, block_header->block_index, block_data);
+    }
+    
+    // 如果blocks数量不足，补全到num_slots
+    while (result.blocks.size() < num_slots) {
+        result.blocks.push_back(dummyBlock);
+    }
+    
+    // 反序列化ptrs和valids
     result.ptrs.resize(num_slots, -1);
     result.valids.resize(num_slots, 0);
     
-    // 检查是否有足够的空间来读取ptrs和valids
-    if (offset + num_slots * 2 * sizeof(int32_t) <= size) {
-     
-        // 反序列化 ptrs
+    // 检查是否有足够的空间来读取ptrs
+    if (offset + num_slots * sizeof(int32_t) <= size) {
         for (int i = 0; i < num_slots; i++) {
-            int32_t ptr = *reinterpret_cast<const int32_t*>(data + offset);
-            result.ptrs[i] = ptr;
+            result.ptrs[i] = *reinterpret_cast<const int32_t*>(data + offset);
             offset += sizeof(int32_t);
         }
-        
-        // 反序列化 valids
-        for (int i = 0; i < num_slots; i++) {
-            int32_t valid = *reinterpret_cast<const int32_t*>(data + offset);
-            result.valids[i] = valid;
-            offset += sizeof(int32_t);
-        }
-   
     } else {
-        // std::cout << "  WARNING: No ptrs and valids data in serialized bucket" << std::endl;
+        std::cerr << "WARNING: Not enough data for ptrs. Need " << num_slots * sizeof(int32_t) 
+                  << " bytes, have " << (size - offset) << std::endl;
+        // 从blocks重建ptrs
+        for (int i = 0; i < result.blocks.size() && i < num_slots; i++) {
+            result.ptrs[i] = result.blocks[i].GetBlockindex();
+        }
     }
-   
+    
+    // 检查是否有足够的空间来读取valids
+    if (offset + num_slots * sizeof(int32_t) <= size) {
+        for (int i = 0; i < num_slots; i++) {
+            result.valids[i] = *reinterpret_cast<const int32_t*>(data + offset);
+            offset += sizeof(int32_t);
+        }
+    } else {
+        std::cerr << "WARNING: Not enough data for valids. Need " << num_slots * sizeof(int32_t) 
+                  << " bytes, have " << (size - offset) << std::endl;
+        // 默认所有块都有效
+        for (int i = 0; i < num_slots; i++) {
+            result.valids[i] = 1;
+        }
+    }
+    
     return result;
 }
+
 
 
 
@@ -470,15 +547,12 @@ ringoram::ReadPathResult ringoram::ReadPath(int leafid, int blockindex)
     
     try
     {
-       
-       
         
         // === 第一步通信：获取路径上所有bucket的元数据 ===
-        std::vector<uint8_t> request_data(8); // 4字节leaf_id + 4字节block_index
+        std::vector<uint8_t> request_data(8);
         *reinterpret_cast<int32_t*>(request_data.data()) = leafid;
         *reinterpret_cast<int32_t*>(request_data.data() + 4) = blockindex;
         
-        // 发送 READ_PATH 请求获取元数据
         std::vector<uint8_t> metadata_response;
         std::string error_msg;
         
@@ -490,9 +564,9 @@ ringoram::ReadPathResult ringoram::ReadPath(int leafid, int blockindex)
         // 解析元数据响应
         size_t offset = 0;
         
-        // 解析block_index（用于验证）
+        // 1. 解析block_index（用于验证）
         if (offset + 4 > metadata_response.size()) {
-            std::cerr << "Invalid metadata response" << std::endl;
+            std::cerr << "Invalid metadata response: too short for block_index" << std::endl;
             return result;
         }
         int32_t resp_blockindex = *reinterpret_cast<const int32_t*>(metadata_response.data() + offset);
@@ -503,15 +577,15 @@ ringoram::ReadPathResult ringoram::ReadPath(int leafid, int blockindex)
             return result;
         }
         
-        // 解析需要洗牌的bucket数量
+        // 2. 解析需要洗牌的bucket数量
         if (offset + 4 > metadata_response.size()) {
-            std::cerr << "Invalid metadata response (no shuffle count)" << std::endl;
+            std::cerr << "Invalid metadata response: too short for shuffle count" << std::endl;
             return result;
         }
         uint32_t shuffle_count = *reinterpret_cast<const uint32_t*>(metadata_response.data() + offset);
         offset += 4;
         
-        // 存储每个bucket的元数据，用于查找目标块位置
+        // 存储每个bucket的元数据
         struct BucketMeta {
             int position;
             int count;
@@ -522,44 +596,52 @@ ringoram::ReadPathResult ringoram::ReadPath(int leafid, int blockindex)
         std::vector<BucketMeta> path_metadata;
         std::vector<int> need_shuffle_positions;
         
-        // 解析路径上每个bucket的元数据
+        // 3. 解析路径上每个bucket的元数据
         while (offset < metadata_response.size()) {
-            if (offset + 8 > metadata_response.size()) break;
-            
             // 读取位置
+            if (offset + 4 > metadata_response.size()) break;
             int32_t position = *reinterpret_cast<const int32_t*>(metadata_response.data() + offset);
-            offset += sizeof(int32_t);
+            offset += 4;
             
             // 读取元数据大小
+            if (offset + 4 > metadata_response.size()) break;
             uint32_t meta_size = *reinterpret_cast<const uint32_t*>(metadata_response.data() + offset);
-            offset += sizeof(uint32_t);
+            offset += 4;
             
-            if (offset + meta_size > metadata_response.size()) break;
+            if (offset + meta_size > metadata_response.size()) {
+                std::cerr << "Incomplete metadata for position " << position << std::endl;
+                break;
+            }
             
             // 解析bucket元数据
             BucketMeta meta;
             meta.position = position;
             
             size_t meta_offset = 0;
+            const uint8_t* meta_data = metadata_response.data() + offset;
             
             // 解析count
-            meta.count = *reinterpret_cast<const int32_t*>(metadata_response.data() + offset + meta_offset);
-            meta_offset += sizeof(int32_t);
+            if (meta_offset + 4 > meta_size) {
+                std::cerr << "Invalid metadata: missing count" << std::endl;
+                break;
+            }
+            meta.count = *reinterpret_cast<const int32_t*>(meta_data + meta_offset);
+            meta_offset += 4;
             
             int num_slots = realBlockEachbkt + dummyBlockEachbkt;
             
             // 解析ptrs
-            meta.ptrs.resize(num_slots);
+            meta.ptrs.resize(num_slots, -1);
             for (int i = 0; i < num_slots && meta_offset + 4 <= meta_size; i++) {
-                meta.ptrs[i] = *reinterpret_cast<const int32_t*>(metadata_response.data() + offset + meta_offset);
-                meta_offset += sizeof(int32_t);
+                meta.ptrs[i] = *reinterpret_cast<const int32_t*>(meta_data + meta_offset);
+                meta_offset += 4;
             }
             
             // 解析valids
-            meta.valids.resize(num_slots);
+            meta.valids.resize(num_slots, 0);
             for (int i = 0; i < num_slots && meta_offset + 4 <= meta_size; i++) {
-                meta.valids[i] = *reinterpret_cast<const int32_t*>(metadata_response.data() + offset + meta_offset);
-                meta_offset += sizeof(int32_t);
+                meta.valids[i] = *reinterpret_cast<const int32_t*>(meta_data + meta_offset);
+                meta_offset += 4;
             }
             
             path_metadata.push_back(meta);
@@ -571,11 +653,13 @@ ringoram::ReadPathResult ringoram::ReadPath(int leafid, int blockindex)
             
             offset += meta_size;
         }
+      
         
-        // === 客户端处理：找到目标块的位置和需要洗牌的bucket ===
+        // === 客户端处理：找到目标块的位置 ===
         int target_position = -1;
         int target_offset = -1;
         
+        // 首先查找目标块
         for (const auto& meta : path_metadata) {
             for (int i = 0; i < meta.ptrs.size(); i++) {
                 if (meta.ptrs[i] == blockindex && meta.valids[i] == 1) {
@@ -587,11 +671,11 @@ ringoram::ReadPathResult ringoram::ReadPath(int leafid, int blockindex)
             if (target_position != -1) break;
         }
         
+        // 如果没有找到目标块，选择一个有效的dummy块位置
         if (target_position == -1) {
-            // 没找到目标块，选择一个dummy块的位置
             for (const auto& meta : path_metadata) {
-                for (int i = 0; i < meta.ptrs.size(); i++) {
-                    if (meta.ptrs[i] == -1 && meta.valids[i] == 1) {
+                for (int i = 0; i < meta.valids.size(); i++) {
+                    if (meta.valids[i] == 1 && meta.ptrs[i] == -1) {
                         target_position = meta.position;
                         target_offset = i;
                         break;
@@ -601,27 +685,44 @@ ringoram::ReadPathResult ringoram::ReadPath(int leafid, int blockindex)
             }
         }
         
+        // 如果还是没有找到，选择第一个bucket的第一个有效位置
+        if (target_position == -1 && !path_metadata.empty()) {
+            const auto& meta = path_metadata[0];
+            for (int i = 0; i < meta.valids.size(); i++) {
+                if (meta.valids[i] == 1) {
+                    target_position = meta.position;
+                    target_offset = i;
+                    break;
+                }
+            }
+        }
+        
+        if (target_position == -1) {
+            std::cerr << "Error: Could not find any valid block position" << std::endl;
+            return result;
+        }
+        
         // === 第二步通信：获取实际数据 ===
         std::vector<uint8_t> fetch_request;
         
         // 添加目标块位置
         fetch_request.insert(fetch_request.end(),
-                           reinterpret_cast<uint8_t*>(&target_position),
-                           reinterpret_cast<uint8_t*>(&target_position) + sizeof(int32_t));
+                           reinterpret_cast<const uint8_t*>(&target_position),
+                           reinterpret_cast<const uint8_t*>(&target_position) + sizeof(int32_t));
         fetch_request.insert(fetch_request.end(),
-                           reinterpret_cast<uint8_t*>(&target_offset),
-                           reinterpret_cast<uint8_t*>(&target_offset) + sizeof(int32_t));
+                           reinterpret_cast<const uint8_t*>(&target_offset),
+                           reinterpret_cast<const uint8_t*>(&target_offset) + sizeof(int32_t));
         
         // 添加需要洗牌的bucket列表
         uint32_t fetch_shuffle_count = static_cast<uint32_t>(need_shuffle_positions.size());
         fetch_request.insert(fetch_request.end(),
-                           reinterpret_cast<uint8_t*>(&fetch_shuffle_count),
-                           reinterpret_cast<uint8_t*>(&fetch_shuffle_count) + sizeof(uint32_t));
+                           reinterpret_cast<const uint8_t*>(&fetch_shuffle_count),
+                           reinterpret_cast<const uint8_t*>(&fetch_shuffle_count) + sizeof(uint32_t));
         
         for (int pos : need_shuffle_positions) {
             fetch_request.insert(fetch_request.end(),
-                               reinterpret_cast<uint8_t*>(&pos),
-                               reinterpret_cast<uint8_t*>(&pos) + sizeof(int32_t));
+                               reinterpret_cast<const uint8_t*>(&pos),
+                               reinterpret_cast<const uint8_t*>(&pos) + sizeof(int32_t));
         }
         
         // 发送 FETCH_BLOCKS 请求获取实际数据
@@ -636,50 +737,94 @@ ringoram::ReadPathResult ringoram::ReadPath(int leafid, int blockindex)
         
         // 解析目标块
         if (data_response.size() < 1) {
+            std::cerr << "Empty data response" << std::endl;
             return result;
         }
         
-        bool target_is_dummy = data_response[offset] == 1;
+        bool target_is_dummy = (data_response[offset] == 1);
         offset += 1;
         
-        if (!target_is_dummy && offset + 4 <= data_response.size()) {
-            uint32_t target_data_size = *reinterpret_cast<const uint32_t*>(data_response.data() + offset);
-            offset += 4;
-            
-            if (offset + target_data_size <= data_response.size()) {
-                std::vector<char> encrypted_data(
-                    data_response.begin() + offset, 
-                    data_response.begin() + offset + target_data_size
-                );
-                offset += target_data_size;
-                
-                result.target_block = block(leafid, blockindex, encrypted_data);
-            }
+        // 解析数据大小
+        if (offset + 4 > data_response.size()) {
+            std::cerr << "Incomplete data size field" << std::endl;
+            return result;
         }
         
-        // 解析需要洗牌的buckets
-        while (offset < data_response.size()) {
-            if (offset + 8 > data_response.size()) break;
+        uint32_t target_data_size = *reinterpret_cast<const uint32_t*>(data_response.data() + offset);
+        offset += 4;
+        
+        // 解析目标块数据
+        if (!target_is_dummy && target_data_size > 0) {
+            if (offset + target_data_size > data_response.size()) {
+                std::cerr << "Incomplete target block data. Expected " << target_data_size 
+                          << " bytes, have " << (data_response.size() - offset) << std::endl;
+                return result;
+            }
             
-            int32_t position = *reinterpret_cast<const int32_t*>(data_response.data() + offset);
-            offset += sizeof(int32_t);
+            std::vector<char> encrypted_data(
+                data_response.begin() + offset, 
+                data_response.begin() + offset + target_data_size
+            );
+            offset += target_data_size;
             
-            uint32_t bucket_size = *reinterpret_cast<const uint32_t*>(data_response.data() + offset);
-            offset += sizeof(uint32_t);
+            result.target_block = block(leafid, blockindex, encrypted_data);
+        } else if (target_is_dummy) {
+            result.target_block = dummyBlock;
+        }
+        
+        // 只有在有需要洗牌的bucket时才解析它们
+        if (need_shuffle_positions.size() > 0) {
+            // 解析需要洗牌的buckets
+            int parsed_buckets = 0;
+            while (offset < data_response.size()) {
+                // 确保至少有8字节（position + bucket_size）
+                if (offset + 8 > data_response.size()) {
+                    std::cout << "Warning: Incomplete bucket header at offset " << offset 
+                              << ", remaining bytes: " << (data_response.size() - offset) << std::endl;
+                    break;
+                }
+                
+                int32_t position = *reinterpret_cast<const int32_t*>(data_response.data() + offset);
+                offset += 4;
+                
+                uint32_t bucket_size = *reinterpret_cast<const uint32_t*>(data_response.data() + offset);
+                offset += 4;
+                
+                if (offset + bucket_size > data_response.size()) {
+                    std::cout << "Error: Incomplete bucket data for position " << position 
+                              << ". Need " << bucket_size << " bytes, have " << (data_response.size() - offset) << std::endl;
+                    break;
+                }
+                
+                try {
+                    bucket bkt = deserialize_bucket(data_response.data() + offset, bucket_size);
+                    offset += bucket_size;
+                    result.need_shuffle_buckets.emplace_back(position, bkt);
+                    parsed_buckets++;
+                } catch (const std::exception& e) {
+                    std::cerr << "Failed to deserialize bucket at position " << position << ": " << e.what() << std::endl;
+                    break;
+                }
+            }
             
-            if (offset + bucket_size > data_response.size()) break;
-            
-            bucket bkt = deserialize_bucket(data_response.data() + offset, bucket_size);
-            offset += bucket_size;
-            
-            result.need_shuffle_buckets.emplace_back(position, bkt);
+            // 验证是否收到了所有请求的洗牌bucket
+            if (result.need_shuffle_buckets.size() != need_shuffle_positions.size()) {
+                std::cerr << "Warning: Expected " << need_shuffle_positions.size() 
+                         << " shuffle buckets, got " << result.need_shuffle_buckets.size() << std::endl;
+            }
+        } else {
+            // 没有需要洗牌的bucket，确保我们不会错误地解析剩余数据
+            if (offset < data_response.size()) {
+                std::cout << "Warning: No shuffle buckets expected but " 
+                          << (data_response.size() - offset) << " extra bytes in response" << std::endl;
+            }
         }
         
         return result;
     }
     catch(const std::exception& e)
     {
-        // std::cerr << "Exception in ReadPath: " << e.what() << std::endl;
+        std::cerr << "Exception in ReadPath: " << e.what() << std::endl;
         return result;
     }
 }
@@ -868,7 +1013,6 @@ void ringoram::EvictPath() {
 
 
 
-
 void ringoram::EarlyReshuffle(int l, const std::vector<std::pair<int, bucket>>& buckets_to_process)
 {
     
@@ -876,7 +1020,7 @@ void ringoram::EarlyReshuffle(int l, const std::vector<std::pair<int, bucket>>& 
     if (buckets_to_process.empty()) {
         return;
     }
-  
+   
     // 3. 处理传入的需要洗牌的buckets
     std::vector<std::pair<int, bucket>> buckets_to_write;
     
